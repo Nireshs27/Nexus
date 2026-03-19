@@ -19,6 +19,9 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import black
 
+from reportlab.lib.utils import ImageReader
+from urllib.request import urlopen
+
 # --- Windows printing
 import win32print
 
@@ -1055,6 +1058,270 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     img = img.crop((0, 0, W, min(H, box_y1 + 12)))
     return _to_1bit(img, threshold=160)
 
+# =============================
+# MULTIROW PACKING & DELIVERY PRINT SLIP
+# =============================
+def _render_multirow_packing_list_image_80mm(data: dict) -> Image.Image:
+    W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
+
+    margin_x = 18
+    top_pad = 14
+    in_pad = 12
+
+    box_x0 = margin_x
+    box_x1 = W - margin_x
+    box_w = box_x1 - box_x0
+
+    rows = data.get("rows") or []
+    if not isinstance(rows, list):
+        rows = []
+
+    # -------------------------
+    # spacing / sizing
+    # -------------------------
+    pad_after_title = 12
+    pad_after_top_line = 10
+    pad_after_info = 10
+    table_header_gap = 8
+    row_line_gap = 18
+    row_block_gap = 6
+    totals_gap = 6
+    barcode_top_gap = 12
+    bottom_pad = 14
+
+    tmp = Image.new("L", (10, 10), 255)
+    draw_tmp = ImageDraw.Draw(tmp)
+
+    def wrap_text(s: str, max_px: int, font) -> list[str]:
+        lines = _wrap_line_px(_safe_str(s), draw_tmp, font, max_px)
+        return lines if lines else [""]
+
+    # -------------------------
+    # columns (match screenshot)
+    # -------------------------
+    col1_x = box_x0 + in_pad                 # Sh Code / Or no
+    col2_x = box_x0 + int(box_w * 0.20)      # Unit Wt / P Sh Name -> moved LEFT
+    col3_r = box_x0 + int(box_w * 0.66)      # Gross Wt
+    col4_r = box_x0 + int(box_w * 0.84)      # Net Wt
+    col5_r = box_x1 - in_pad                 # Qty
+
+    left_max_px = (col2_x - 10) - col1_x
+    prod_max_px = (col3_r - 22) - col2_x
+
+    h_title = _font_line_h(F_PL_TITLE)
+    h_info = _font_line_h(F_PL_INFO)
+    h_hdr = _font_line_h(F_PL_ROW_B)
+    h_row = _font_line_h(F_PL_ROW)
+
+    # -------------------------
+    # height estimation
+    # -------------------------
+    rows_h = 0
+    for r in rows:
+        sh_code = _safe_str(r.get("shCode") or r.get("partyShortCode") or r.get("partyAccountShortCode") or r.get("code"))
+        order_no = _safe_str(r.get("orderNo"))
+        branch_code = _safe_str(r.get("branchCode"))
+
+        left_lines = []
+        if sh_code:
+            left_lines.append(sh_code)
+
+        if order_no:
+            left_lines.append(f"/ {order_no}")
+        elif branch_code:
+            left_lines.append(f"/ {branch_code}")
+
+        if not left_lines:
+            left_lines = [""]
+
+        unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
+        shortn = _safe_str(r.get("itemShortName") or r.get("productShortName") or r.get("productName") or r.get("product"))
+        prod_text = f"{unitwt} {shortn}".strip()
+
+        left_wrapped = []
+        for ln in left_lines:
+            left_wrapped.extend(wrap_text(ln, left_max_px, F_PL_ROW))
+
+        prod_wrapped = wrap_text(prod_text, prod_max_px, F_PL_ROW)
+
+        line_count = max(len(left_wrapped), len(prod_wrapped), 1)
+        rows_h += (line_count * row_line_gap) + row_block_gap
+
+    header_h = (
+        10 + h_title + pad_after_title +
+        1 + pad_after_top_line +
+        (h_info * 2) + pad_after_info +
+        (h_hdr * 2) + table_header_gap +
+        1 + 8
+    )
+
+    totals_h = (h_info + totals_gap) * 3 + 12
+    barcode_h = 96 + 10 + h_info + bottom_pad
+
+    H = max(top_pad + header_h + rows_h + totals_h + barcode_h + 40, 900)
+
+    img = Image.new("L", (W, H), 255)
+    draw = ImageDraw.Draw(img)
+
+    y = top_pad
+    box_y0 = y
+
+    # -------------------------
+    # title
+    # -------------------------
+    y += 10
+    _draw_text_center(draw, box_x0 + box_w / 2, y, "Multirow Packing List", F_PL_TITLE)
+    y += h_title + pad_after_title
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += pad_after_top_line
+
+    # -------------------------
+    # top info (2 rows exactly like screenshot)
+    # -------------------------
+    date_str = _safe_str(data.get("date"))
+    account_code = _safe_str(data.get("accountCode"))
+    supplier = _safe_str(data.get("supplier"))
+    recipient = _safe_str(data.get("recipient"))
+
+    _draw_text(draw, box_x0 + in_pad, y, f"Date: {date_str}" if date_str else "Date:", F_PL_INFO)
+    _draw_text_right(draw, box_x1 - in_pad, y, f"Supplier:{supplier}" if supplier else "Supplier:", F_PL_INFO)
+    y += h_info + 4
+
+    _draw_text(draw, box_x0 + in_pad, y, f"A/c Code: {account_code}" if account_code else "A/c Code:", F_PL_INFO)
+    _draw_text_right(draw, box_x1 - in_pad, y, f"Recipient: {recipient}" if recipient else "Recipient:", F_PL_INFO)
+    y += h_info + 8
+
+    # TOP BORDER LINE ABOVE TABLE HEADER
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 8
+
+    # table header starts here
+    h1 = _draw_multiline(draw, col1_x, y, "Sh Code\n/ Or no", F_PL_ROW_B, line_gap=2)
+    h2 = _draw_multiline(draw, col2_x - 4, y, "Unit Wt\nP Sh Name", F_PL_ROW_B, line_gap=2)
+    h3 = _draw_multiline(draw, col3_r - int(_text_w(draw, "Gross Wt", F_PL_ROW_B)), y, "Gross Wt\n(gms)", F_PL_ROW_B, line_gap=2)
+    h4 = _draw_multiline(draw, col4_r - int(_text_w(draw, "Net Wt", F_PL_ROW_B)), y, "Net Wt\n(gms)", F_PL_ROW_B, line_gap=2)
+
+    qty_y = y + int((max(h1, h2, h3, h4) - h_hdr) / 2)
+    _draw_text_right(draw, col5_r, qty_y, "Qty", F_PL_ROW_B)
+
+    y += max(h1, h2, h3, h4) + table_header_gap
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 8
+
+    # -------------------------
+    # rows
+    # -------------------------
+    for r in rows:
+        sh_code = _safe_str(r.get("shCode") or r.get("partyShortCode") or r.get("partyAccountShortCode") or r.get("code"))
+        order_no = _safe_str(r.get("orderNo"))
+        branch_code = _safe_str(r.get("branchCode"))
+
+        left_lines = []
+        if sh_code:
+            left_lines.append(sh_code)
+
+        if order_no:
+            left_lines.append(f"/ {order_no}")
+        elif branch_code:
+            left_lines.append(f"/ {branch_code}")
+
+        if not left_lines:
+            left_lines = [""]
+
+        unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
+        shortn = _safe_str(r.get("itemShortName") or r.get("productShortName") or r.get("productName") or r.get("product"))
+        prod_text = f"{unitwt} {shortn}".strip()
+
+        gross_wt = _safe_str(r.get("grossWt") or r.get("grossWeight"))
+        net_wt = _safe_str(r.get("netWt") or r.get("netWeight"))
+        qty = _safe_str(r.get("qty"))
+
+        left_wrapped = []
+        for ln in left_lines:
+            left_wrapped.extend(wrap_text(ln, left_max_px, F_PL_ROW))
+
+        prod_wrapped = wrap_text(prod_text, prod_max_px, F_PL_ROW)
+
+        line_count = max(len(left_wrapped), len(prod_wrapped), 1)
+        row_top = y
+
+        for i in range(line_count):
+            yy = row_top + i * row_line_gap
+
+            if i < len(left_wrapped):
+                _draw_text(draw, col1_x, yy, left_wrapped[i], F_PL_ROW)
+
+            if i < len(prod_wrapped):
+                _draw_text(draw, col2_x, yy, prod_wrapped[i], F_PL_ROW)
+
+            if i == 0:
+                _draw_text_right(draw, col3_r, yy, gross_wt, F_PL_ROW)
+                _draw_text_right(draw, col4_r, yy, net_wt, F_PL_ROW)
+                _draw_text_right(draw, col5_r, yy, qty, F_PL_ROW)
+
+        y += (line_count * row_line_gap) + row_block_gap
+
+    # divider
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 12
+
+    # -------------------------
+    # totals
+    # -------------------------
+    total_net = _safe_str(data.get("totalNetWt"))
+    total_gross = _safe_str(data.get("totalGrossWt"))
+    total_qty = _safe_str(data.get("totalQty"))
+    row_count = _safe_str(data.get("rowCount")) or str(len(rows))
+
+    if total_net:
+        _draw_text_center(draw, box_x0 + box_w / 2, y, f"Total Net Weight (gms):  {total_net}", F_PL_INFO)
+        y += h_info + totals_gap
+
+    if total_gross:
+        _draw_text_center(draw, box_x0 + box_w / 2, y, f"Total Gross Weight (gms):  {total_gross}", F_PL_INFO)
+        y += h_info + totals_gap
+
+    _draw_text_center(draw, box_x0 + box_w / 2, y, f"Total Qty: {total_qty} Row Count: {row_count}", F_PL_INFO)
+    y += h_info + barcode_top_gap
+
+    # -------------------------
+    # barcode
+    # -------------------------
+    barcode_val = account_code or "K0000"
+
+    bx0 = box_x0 + in_pad
+    bx1 = box_x1 - in_pad
+    avail_w = bx1 - bx0
+
+    bar_h = 84
+    bar_w = int(avail_w * 0.72)
+
+    barcode_img = code128_pil(
+        barcode_val,
+        bar_w,
+        bar_h,
+        module_width=0.22,
+        module_height=12.0,
+        quiet_zone=1.2,
+        threshold=220,
+    )
+
+    if barcode_img.mode != "1":
+        barcode_img = barcode_img.convert("1")
+
+    paste_x = int(bx0 + (avail_w - bar_w) / 2)
+    img.paste(barcode_img, (paste_x, y))
+
+    y += bar_h + 8
+    _draw_text_center(draw, box_x0 + box_w / 2, y, barcode_val, F_PL_INFO)
+    y += h_info
+
+    box_y1 = y + 12
+    draw.rectangle((box_x0, box_y0, box_x1, box_y1), outline=0, width=1)
+
+    img = img.crop((0, 0, W, box_y1 + 12))
+    return img
 
 # =========================
 # PACKING LIST FONTS
@@ -1936,6 +2203,35 @@ def print_packing_delivery_slip_raster():
         log(f"/print-packing-delivery-slip-raster error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/print-multirow-packing-list-raster", methods=["POST"])
+def print_multirow_packing_list_raster():
+    data = request.get_json(force=True, silent=True) or {}
+    printer = data.get("printer")
+    if not printer:
+        return jsonify({"ok": False, "error": "missing 'printer'"}), 400
+
+    try:
+        img1 = _render_multirow_packing_list_image_80mm(data)
+        parts = [b"\x1b@", _img_to_escpos_raster(img1), b"\r\n"]
+
+        feed_lines = int(data.get("feedLines", 3))
+        cut = bool(data.get("cut", True))
+        cut_mode = str(data.get("cutMode", "full")).lower()
+
+        if cut:
+            parts.append(_esc_feed(feed_lines))
+            parts.append(_esc_cut(cut_mode))
+
+        _write_raw(printer, b"".join(parts))
+        return jsonify({
+            "ok": True,
+            "widthDots": img1.size[0],
+            "heightDots": img1.size[1]
+        })
+    except Exception as e:
+        log(f"/print-multirow-packing-list-raster error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/print-packing-list-raster", methods=["POST"])
 def print_packing_list_raster():
@@ -2679,6 +2975,32 @@ def _join_addr(*parts):
     parts = [_safe_str(p) for p in parts if _safe_str(p)]
     return "\n".join(parts)
 
+def _load_bg_image(bg_source: str):
+    """
+    Supports:
+    - local absolute file path
+    - http/https URL
+    Returns ImageReader or None
+    """
+    src = _safe_str(bg_source)
+    if not src:
+        return None
+
+    try:
+        if src.lower().startswith(("http://", "https://")):
+            with urlopen(src, timeout=15) as resp:
+                raw = resp.read()
+            return ImageReader(io.BytesIO(raw))
+
+        p = Path(src)
+        if p.exists():
+            return ImageReader(str(p))
+
+    except Exception as e:
+        log(f"background image load failed: {e}")
+
+    return None
+
 
 def _render_delivery_challan_pdf_reportlab(
     data: dict,
@@ -2723,6 +3045,69 @@ def _render_delivery_challan_pdf_reportlab(
     # Columns for remarks/signatures (keep as before proportions but based on left/right)
     sig_left_w = left_w + (right_w * 0.35)
     sig_right_w = right_w * 0.65
+
+    bg_source = (
+        _safe_str(data.get("backgroundImageUrl")) or
+        _safe_str(data.get("backgroundImagePath")) or
+        _safe_str(data.get("logo")) or
+        _safe_str(data.get("backgroundImage"))
+    )
+    bg_image = _load_bg_image(bg_source)
+
+    def _draw_page_bg(canvas_obj, doc_obj):
+        if not bg_image:
+            return
+
+        try:
+            page_w, page_h = doc.pagesize
+            canvas_obj.saveState()
+
+            try:
+                canvas_obj.setFillAlpha(0.30)
+            except Exception:
+                pass
+
+            def draw_bg_in_area(area_x, area_y, area_w, area_h):
+                img_w = min(area_w * 0.42, 120 * mm)
+                img_h = min(area_h * 0.42, 120 * mm)
+
+                x = area_x + ((area_w - img_w) / 2)
+                y = area_y + ((area_h - img_h) / 2)
+
+                canvas_obj.drawImage(
+                    bg_image,
+                    x,
+                    y,
+                    width=img_w,
+                    height=img_h,
+                    preserveAspectRatio=True,
+                    mask='auto'
+                )
+
+            if two_per_page:
+                gap = 1 * mm
+                half_h = (page_h - doc.topMargin - doc.bottomMargin - gap) / 2.0
+
+                content_x = doc.leftMargin
+                content_w = page_w - doc.leftMargin - doc.rightMargin
+
+                bottom_y = doc.bottomMargin
+                top_y = doc.bottomMargin + half_h + gap
+
+                draw_bg_in_area(content_x, top_y, content_w, half_h)
+                draw_bg_in_area(content_x, bottom_y, content_w, half_h)
+            else:
+                content_x = doc.leftMargin
+                content_y = doc.bottomMargin
+                content_w = page_w - doc.leftMargin - doc.rightMargin
+                content_h = page_h - doc.topMargin - doc.bottomMargin
+
+                draw_bg_in_area(content_x, content_y, content_w, content_h)
+
+            canvas_obj.restoreState()
+
+        except Exception as e:
+            log(f"background draw failed: {e}")
 
     def _get_additional_infos():
         # Support both flat keys and nested object
@@ -2988,7 +3373,9 @@ def _render_delivery_challan_pdf_reportlab(
 
     if not two_per_page:
         frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="single")
-        doc.addPageTemplates([PageTemplate(id="p1", frames=[frame])])
+        doc.addPageTemplates([
+            PageTemplate(id="p1", frames=[frame], onPage=_draw_page_bg)
+        ])
         story = build_one_challan_flowables()
         doc.build(story)
         return output_pdf_path
@@ -3000,7 +3387,9 @@ def _render_delivery_challan_pdf_reportlab(
     bottom_frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, half_h, id="bottom")
     top_frame = Frame(doc.leftMargin, doc.bottomMargin + half_h + gap, doc.width, half_h, id="top")
 
-    doc.addPageTemplates([PageTemplate(id="two_up", frames=[top_frame, bottom_frame])])
+    doc.addPageTemplates([
+        PageTemplate(id="two_up", frames=[top_frame, bottom_frame], onPage=_draw_page_bg)
+    ])
 
     story = []
     story.extend(build_one_challan_flowables())
