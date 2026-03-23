@@ -955,58 +955,139 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     diff_row_h = 54
     qty_row_h  = 28
 
-    H = 520
+    # -------------------------
+    # Optional Delivery ID barcode
+    # -------------------------
+    delivery_id = _safe_str(
+        data.get("deliveryId")
+        or data.get("deliveryID")
+        or data.get("deliveryNo")
+        or data.get("deliveryNumber")
+    )
+
+    show_delivery_barcode = bool(delivery_id)
+
+    # extra space only when barcode exists
+    delivery_bar_h = 40
+    delivery_bar_w = 260  # or 280 if space allows
+    delivery_text_gap = 6
+    delivery_block_gap = 20
+    delivery_total_h = 0
+    if show_delivery_barcode:
+        delivery_total_h = delivery_bar_h + _font_line_h(F_UNIT) + delivery_text_gap + delivery_block_gap
+
+    H = 520 + delivery_total_h + 20
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
 
     y = top_pad
     box_y0 = y
 
-    def _centered_y(row_top_y: int, row_h: int, val_font, unit_font) -> int:
-        a1, d1 = val_font.getmetrics()
-        a2, d2 = unit_font.getmetrics()
-        h_line = max(a1 + d1, a2 + d2)
-        y_calc = row_top_y + (row_h - h_line) // 2
-        return max(row_top_y + 1, y_calc)
+    # Outer top border
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 8
 
-    y += 6
-    _draw_text(draw, box_x0 + in_pad_x, y, _safe_str(data.get("accountCode")), F_HDR)
-    _draw_text_right(draw, box_x1 - in_pad_x, y, _safe_str(data.get("date")), F_TXT)
+    # -------------------------
+    # Top header line
+    # -------------------------
+    account_code = _safe_str(data.get("accountCode"))
+    date_str = _safe_str(data.get("date"))
+
+    if account_code:
+        _draw_text(draw, box_x0 + in_pad_x, y, account_code, F_TXT)
+    if date_str:
+        _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
+
     y += gap_after_header
 
+    # -------------------------
+    # Delivery ID barcode block
+    # -------------------------
+    if show_delivery_barcode:
+        barcode_left = box_x0 + in_pad_x + 6
+        barcode_right = box_x1 - in_pad_x - 6
+        avail_w = barcode_right - barcode_left
+
+        delivery_bar_w = min(int(avail_w * 0.80), 300)
+        paste_x = int(barcode_left + (avail_w - delivery_bar_w) / 2)
+
+        delivery_barcode_img = code128_pil(
+            delivery_id,
+            delivery_bar_w,
+            delivery_bar_h,
+            module_width=0.40,
+            module_height=14.0,
+            quiet_zone=2.5,
+            threshold=160,
+        )
+
+        if delivery_barcode_img.mode != "1":
+            delivery_barcode_img = delivery_barcode_img.convert("1")
+
+        img.paste(delivery_barcode_img, (paste_x, y))
+        y += delivery_bar_h + delivery_text_gap
+
+        _draw_text_center(draw, box_x0 + box_w / 2, y, f"Delivery ID: {delivery_id}", F_UNIT)
+        y += _font_line_h(F_UNIT) + delivery_block_gap
+
+    # Divider below header / delivery barcode block
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
     y += gap_after_divider
 
-    cust = _safe_str(data.get("customerCode"))
-    pbc  = _safe_str(data.get("partyBranchCode"))
+    # -------------------------
+    # Customer + branch/PO/order line
+    # -------------------------
+    customer = _safe_str(data.get("customerCode") or data.get("customer"))
+    branch_code = _safe_str(data.get("partyBranchCode"))
+    po_no = _safe_str(data.get("poNumber"))
+    order_no = _safe_str(data.get("orderNo"))
 
-    if cust:
-        _draw_text(draw, box_x0 + in_pad_x, y, cust, F_TXT_B)
-    if pbc:
-        _draw_text_right(draw, box_x1 - in_pad_x, y, pbc, F_TXT)
+    if customer:
+        _draw_text(draw, box_x0 + in_pad_x, y, customer, F_TXT)
 
-    if cust or pbc:
-        y += line_gap
+    right_text = ""
+    if branch_code and po_no:
+        right_text = f"{branch_code}: {po_no}"
+    elif branch_code and order_no:
+        right_text = f"{branch_code}: {order_no}"
+    elif po_no:
+        right_text = po_no
+    elif order_no:
+        right_text = order_no
+    elif branch_code:
+        right_text = branch_code
 
-    uw = _safe_str(data.get("unitWeight"))
-    item = _safe_str(data.get("itemName"))
-    combined = f"{uw}-{item}" if uw else item
+    if right_text:
+        _draw_text_right(draw, box_x1 - in_pad_x, y, right_text, F_TXT)
+
+    y += line_gap
+
+    # -------------------------
+    # Item / product line
+    # -------------------------
+    unitwt = _safe_str(data.get("unitWt") or data.get("unitWeight"))
+    item_name = _safe_str(
+        data.get("itemShortName")
+        or data.get("productShortName")
+        or data.get("itemName")
+        or data.get("productName")
+        or data.get("product")
+    )
+    item_text = f"{unitwt}-{item_name}".strip("-").strip()
 
     usable_w = box_w - (in_pad_x * 2)
-    lines = _wrap_line_px(combined, draw, F_TXT_B, usable_w)
+    lines = _wrap_line_px(item_text, draw, F_TXT_B, usable_w)
     for ln in lines:
         _draw_text(draw, box_x0 + in_pad_x, y, ln, F_TXT_B)
         y += item_line_gap
-
-    po = _safe_str(data.get("poNumber"))
-    if po:
-        _draw_text(draw, box_x0 + in_pad_x, y, po, F_TXT)
-        y += line_gap
 
     y += gap_before_weights
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
     y += 6
 
+    # -------------------------
+    # Weights
+    # -------------------------
     gw = _safe_str(data.get("grossWt"))
     nw = _safe_str(data.get("netWt"))
     same = (gw == nw) and gw != ""
@@ -1014,9 +1095,14 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     label_w = int(box_w * 0.42)
     split_x = box_x0 + label_w
 
-    # NOTE: This slip intentionally uses bigger weight font (your earlier request)
     val_font  = ImageFont.truetype(FONT_BOLD_PATH, 38)
     unit_font = F_TXT
+
+    def _centered_y(row_top: int, row_h: int, val_font, unit_font) -> int:
+        val_h = _font_line_h(val_font)
+        unit_h = _font_line_h(unit_font)
+        content_h = max(val_h, unit_h)
+        return row_top + int((row_h - content_h) / 2) - 2
 
     if same:
         row_h = same_row_h
@@ -1048,6 +1134,9 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
 
         y += gap_after_weights
 
+    # -------------------------
+    # Qty
+    # -------------------------
     qty = _safe_str(data.get("qty"))
     _draw_text(draw, box_x0 + in_pad_x, y + 6, f"Qty: {qty}", F_TXT_B)
     y += qty_row_h
@@ -1057,6 +1146,7 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
 
     img = img.crop((0, 0, W, min(H, box_y1 + 12)))
     return _to_1bit(img, threshold=160)
+
 
 # =============================
 # MULTIROW PACKING & DELIVERY PRINT SLIP
