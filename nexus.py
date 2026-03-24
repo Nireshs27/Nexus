@@ -996,7 +996,8 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     if account_code:
         _draw_text(draw, box_x0 + in_pad_x, y, account_code, F_TXT)
     if date_str:
-        _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
+        # _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
+        _draw_text_right(draw, box_x1 - in_pad_x - 80, y, date_str, F_TXT)
 
     y += gap_after_header
 
@@ -1027,7 +1028,7 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
         img.paste(delivery_barcode_img, (paste_x, y))
         y += delivery_bar_h + delivery_text_gap
 
-        _draw_text_center(draw, box_x0 + box_w / 2, y, f"Delivery ID: {delivery_id}", F_UNIT)
+        _draw_text_center(draw, box_x0 + box_w / 2, y, f"ID: {delivery_id}", F_UNIT)
         y += _font_line_h(F_UNIT) + delivery_block_gap
 
     # Divider below header / delivery barcode block
@@ -1058,7 +1059,8 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
         right_text = branch_code
 
     if right_text:
-        _draw_text_right(draw, box_x1 - in_pad_x, y, right_text, F_TXT)
+        # _draw_text_right(draw, box_x1 - in_pad_x, y, right_text, F_TXT)
+        _draw_text_right(draw, box_x1 - in_pad_x - 80, y, right_text, F_TXT)
 
     y += line_gap
 
@@ -1112,7 +1114,8 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
         _draw_text_center(draw, box_x0 + label_w / 2, y + 42, "/Net Wt", F_TXT_B)
 
         val_y = _centered_y(y, row_h, val_font, unit_font)
-        _draw_value_with_unit_centered(draw, split_x, box_x1, val_y, gw, val_font, "gms", unit_font, gap=8)
+        # _draw_value_with_unit_centered(draw, split_x, box_x1, val_y, gw, val_font, "gms", unit_font, gap=8)
+        _draw_value_with_unit_centered(draw, split_x, box_x1 - 80, val_y, gw, val_font, "gms", unit_font, gap=8)
 
         y += row_h
         draw.line((box_x0, y, box_x1, y), fill=0, width=1)
@@ -1124,7 +1127,8 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
             nonlocal y
             _draw_text_center(draw, box_x0 + label_w / 2, y + (row_h // 2) - 10, label, F_TXT_B)
             val_y = _centered_y(y, row_h, val_font, unit_font)
-            _draw_value_with_unit_centered(draw, split_x, box_x1, val_y, val, val_font, "gms", unit_font, gap=8)
+            # _draw_value_with_unit_centered(draw, split_x, box_x1, val_y, val, val_font, "gms", unit_font, gap=8)
+            _draw_value_with_unit_centered(draw, split_x, box_x1 - 80, val_y, val, val_font, "gms", unit_font, gap=8)
             draw.line((split_x, y, split_x, y + row_h), fill=0, width=1)
             y += row_h
             draw.line((box_x0, y, box_x1, y), fill=0, width=1)
