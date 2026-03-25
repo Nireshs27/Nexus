@@ -391,7 +391,7 @@ from pathlib import Path
 from decimal import Decimal
 from functools import lru_cache
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance, ImageChops
 from flask import Flask, request, jsonify
 
 # --- Windows RAW print ---
@@ -439,6 +439,9 @@ F_TXT_B   = ImageFont.truetype(FONT_BOLD_PATH, 24)
 F_BIG     = ImageFont.truetype(FONT_BOLD_PATH, 50)
 F_BIG_ROW = ImageFont.truetype(FONT_BOLD_PATH, 36)
 F_UNIT    = ImageFont.truetype(FONT_REGULAR_PATH, 20)
+# Job create slip — weight numerals (~2× F_TXT / F_TXT_B)
+F_JC_WEIGHT   = ImageFont.truetype(FONT_REGULAR_PATH, 48)
+F_JC_WEIGHT_B = ImageFont.truetype(FONT_BOLD_PATH, 48)
 
 # =========================
 # ESC/POS + RAW PRINT HELPERS
@@ -485,6 +488,19 @@ def _img_to_escpos_raster(img_1bit: Image.Image) -> bytes:
 def _to_1bit(img: Image.Image, threshold: int = 160) -> Image.Image:
     gray = img.convert("L")
     return gray.point(lambda p: 0 if p < threshold else 255, mode="1")
+
+
+def _to_1bit_floyd_steinberg(img: Image.Image) -> Image.Image:
+    """
+    Error-diffusion dither for 1-bit thermal output. Preserves facial mid-tones
+    (halftone dots) instead of crushing them with a flat threshold.
+    """
+    gray = img.convert("L")
+    try:
+        dith = Image.Dither.FLOYDSTEINBERG
+    except AttributeError:
+        dith = Image.FLOYDSTEINBERG  # type: ignore[attr-defined]
+    return gray.convert("1", dither=dith)
 
 
 def _write_raw(printer_name: str, payload: bytes):
@@ -2186,6 +2202,350 @@ def _render_balance_summary_image_80mm(data: dict) -> Image.Image:
     return _to_1bit(img, threshold=160)
 
 
+# =========================
+# JOB CREATE SLIP (80mm)
+# =========================
+
+def _fmt_job_slip_weight(v) -> str:
+    try:
+        return f"{max(0.0, float(v)):.3f}g"
+    except Exception:
+        return "0.000g"
+
+
+def _decode_worker_thumb_b64(b64: str):
+    if not b64 or not isinstance(b64, str):
+        return None
+    s = b64.strip()
+    if s.startswith("data:") and "," in s:
+        s = s.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(s)
+        return Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception:
+        return None
+
+
+def _paste_worker_thumb_job_create_slip(canvas: Image.Image, gx: int, gy: int, thumb_rgba: Image.Image, size: int):
+    """
+    Paste employee photo for JOB CREATE slip: composite on white, stretch contrast,
+    gamma-brighten shadows (reduces 'solid black face' on thermal), then paste with alpha.
+    Final slip uses Floyd–Steinberg dither so tones survive 1-bit printing.
+    """
+    t = thumb_rgba.resize((size, size), Image.Resampling.LANCZOS)
+    if t.mode != "RGBA":
+        t = t.convert("RGBA")
+    bg = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+    comp = Image.alpha_composite(bg, t)
+    L = comp.convert("RGB").convert("L")
+    L = ImageOps.autocontrast(L, cutoff=1)
+    # Gamma < 1 lifts dark skin / shadow areas before 1-bit conversion
+    gamma = 0.52
+    lut = [min(255, int(round(255.0 * ((i / 255.0) ** gamma)))) for i in range(256)]
+    L = L.point(lut)
+    L = ImageEnhance.Brightness(L).enhance(1.14)
+    L = ImageEnhance.Contrast(L).enhance(1.06)
+    a = t.split()[3]
+    canvas.paste(L, (gx, gy), a)
+
+
+def _paste_worker_thumb_circle_job_create_slip(canvas: Image.Image, gx: int, gy: int, thumb_rgba: Image.Image, size: int):
+    """Same processing as square paste, but composite onto canvas with a circular mask."""
+    t = thumb_rgba.resize((size, size), Image.Resampling.LANCZOS)
+    if t.mode != "RGBA":
+        t = t.convert("RGBA")
+    bg = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+    comp = Image.alpha_composite(bg, t)
+    L = comp.convert("RGB").convert("L")
+    L = ImageOps.autocontrast(L, cutoff=1)
+    gamma = 0.52
+    lut = [min(255, int(round(255.0 * ((i / 255.0) ** gamma)))) for i in range(256)]
+    L = L.point(lut)
+    L = ImageEnhance.Brightness(L).enhance(1.14)
+    L = ImageEnhance.Contrast(L).enhance(1.06)
+    a = t.split()[3]
+    circle = Image.new("L", (size, size), 0)
+    cd = ImageDraw.Draw(circle)
+    cd.ellipse((0, 0, size - 1, size - 1), fill=255)
+    mask = ImageChops.multiply(a, circle)
+    canvas.paste(L, (gx, gy), mask)
+
+
+def _draw_worker_initials_circle_job_create_slip(draw: ImageDraw.ImageDraw, gx: int, gy: int, size: int, name: str, font_ini):
+    draw.ellipse((gx, gy, gx + size - 1, gy + size - 1), outline=0, width=1)
+    ini = (_safe_str(name) or "?")[:2].upper()
+    cx = gx + size // 2
+    cy = gy + size // 2
+    lh = _font_line_h(font_ini)
+    _draw_text_center(draw, cx, cy - lh // 2, ini, font_ini)
+
+
+def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
+    W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
+    margin_x = 18
+    top_pad = 14
+    in_pad_x = 14
+    box_x0 = margin_x
+    box_x1 = W - margin_x
+    box_w = box_x1 - box_x0
+
+    job_code = _safe_str(data.get("jobCode")) or "-"
+    date_time = _safe_str(data.get("dateTime")) or "-"
+    # Default process when a finished row omits processName (job-level from client)
+    process_name_default = _safe_str(data.get("processName")) or "-"
+
+    workers_in = data.get("workers")
+    if not isinstance(workers_in, list) or len(workers_in) == 0:
+        workers_in = [{"name": "NA"}]
+
+    enable_giving = bool(data.get("enableGiving"))
+    giving_rows = data.get("givingRows") or []
+    if not isinstance(giving_rows, list):
+        giving_rows = []
+
+    giving_net = 0.0
+    try:
+        giving_net = float(data.get("givingNet") or 0)
+    except Exception:
+        giving_net = 0.0
+
+    has_giving = enable_giving and (giving_net > 0 or len(giving_rows) > 0)
+
+    finished_rows = data.get("finishedRows") or []
+    if not isinstance(finished_rows, list):
+        finished_rows = []
+
+    form_item = _safe_str(data.get("formItemName")) or "-"
+    try:
+        form_qty = int(data.get("formQuantity") or 1)
+    except Exception:
+        form_qty = 1
+
+    if len(finished_rows) == 0:
+        finished_rows = [{"itemName": form_item, "quantity": form_qty, "unitWeight": data.get("formUnitWeight")}]
+
+    # Tall enough for many workers + many giving rows (crop to content at end)
+    H = 4000
+    img = Image.new("L", (W, H), 255)
+    draw = ImageDraw.Draw(img)
+    y = top_pad
+    box_y0 = y
+
+    # Header
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 10
+    _draw_text_center(draw, box_x0 + box_w / 2, y, "JOB CREATE SLIP", F_HDR)
+    y += _font_line_h(F_HDR) + 8
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 14
+
+    _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
+    _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
+    y += _font_line_h(F_TXT) + 10
+
+    # Workers: sketch layout — 1 worker = centered circle + name below; 2+ = overlapping circles + comma names
+    worker_entries = []
+    for w in workers_in:
+        if not isinstance(w, dict):
+            continue
+        nm = _safe_str(w.get("name")) or "-"
+        b64 = w.get("imageB64")
+        worker_entries.append({"name": nm, "b64": b64 if isinstance(b64, str) else None})
+
+    if not worker_entries:
+        worker_entries = [{"name": "NA", "b64": None}]
+
+    thumb_base = int(round(56 * 1.6))
+    gap_after_workers = 10
+    F_NAME = F_TXT
+    lh_name = _font_line_h(F_NAME)
+    cx_page = box_x0 + box_w / 2
+    wrap_w_names = max(60, int(box_w - 2 * in_pad_x))
+
+    n_workers = len(worker_entries)
+
+    if n_workers == 1:
+        thumb_size = thumb_base
+        ent = worker_entries[0]
+        gx = int(cx_page - thumb_size / 2)
+        im = _decode_worker_thumb_b64(ent["b64"] or "")
+        if im:
+            _paste_worker_thumb_circle_job_create_slip(img, gx, y, im, thumb_size)
+        else:
+            _draw_worker_initials_circle_job_create_slip(draw, gx, y, thumb_size, ent["name"], F_TXT_B)
+        y += thumb_size + gap_after_workers
+        name_plain = _safe_str(ent.get("name")) or "-"
+        lines = _wrap_line_px(name_plain, draw, F_NAME, wrap_w_names) or ["-"]
+        for ln in lines:
+            _draw_text_center(draw, cx_page, y, ln, F_NAME)
+            y += lh_name + 2
+    else:
+        thumb_m = thumb_base
+        step = max(1, int(thumb_m * 0.9))
+        max_inner = int(box_w - 2 * in_pad_x)
+        while thumb_m > 32:
+            total_w = thumb_m + (n_workers - 1) * step
+            if total_w <= max_inner:
+                break
+            thumb_m = max(32, int(thumb_m * 0.9))
+            step = max(1, int(thumb_m * 0.9))
+        total_w = thumb_m + (n_workers - 1) * step
+        start_gx = int(cx_page - total_w / 2)
+        row_top = y
+        for i, ent in enumerate(worker_entries):
+            gx_i = start_gx + i * step
+            im = _decode_worker_thumb_b64(ent["b64"] or "")
+            if im:
+                _paste_worker_thumb_circle_job_create_slip(img, gx_i, row_top, im, thumb_m)
+            else:
+                _draw_worker_initials_circle_job_create_slip(draw, gx_i, row_top, thumb_m, ent["name"], F_TXT_B)
+        y = row_top + thumb_m + gap_after_workers
+        combined = ", ".join(_safe_str(e.get("name")) or "-" for e in worker_entries)
+        lines = _wrap_line_px(combined, draw, F_NAME, wrap_w_names) or ["-"]
+        for ln in lines:
+            _draw_text_center(draw, cx_page, y, ln, F_NAME)
+            y += lh_name + 2
+
+    y += 4
+
+    # INPUTS
+    if has_giving:
+        draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+        y += 10
+        t_in = "INPUTS"
+        tw = _text_w(draw, t_in, F_TXT_B)
+        _draw_text_center(draw, box_x0 + box_w / 2, y, t_in, F_TXT_B)
+        y += _font_line_h(F_TXT_B) + 4
+        draw.line((box_x0 + box_w / 2 - tw / 2, y, box_x0 + box_w / 2 + tw / 2, y), fill=0, width=1)
+        y += 12
+
+        total_net = 0.0
+        lh_lbl = _font_line_h(F_TXT)
+        lh_wt = _font_line_h(F_JC_WEIGHT)
+
+        def _draw_input_row(label: str, wt_str: str):
+            nonlocal y
+            rh = max(lh_lbl, lh_wt)
+            _draw_text(draw, box_x0 + in_pad_x, y + (rh - lh_lbl) // 2, label[:48], F_TXT)
+            _draw_text_right(draw, box_x1 - in_pad_x, y + (rh - lh_wt) // 2, wt_str, F_JC_WEIGHT)
+            y += rh + 6
+
+        if len(giving_rows) > 0:
+            for r in giving_rows:
+                if not isinstance(r, dict):
+                    continue
+                item = _safe_str(r.get("itemName")) or "-"
+                try:
+                    nw = float(r.get("netWeight") or 0)
+                except Exception:
+                    nw = 0.0
+                total_net += nw
+                _draw_input_row(item, _fmt_job_slip_weight(nw))
+        else:
+            i_name = _safe_str(data.get("givingItemName")) or "Gold Bar"
+            try:
+                gg = float(data.get("givingGross") or 0)
+            except Exception:
+                gg = 0.0
+            try:
+                st = float(data.get("stone") or 0)
+            except Exception:
+                st = 0.0
+            try:
+                eh = float(data.get("eh") or 0)
+            except Exception:
+                eh = 0.0
+            _draw_input_row(i_name, _fmt_job_slip_weight(gg))
+            if st > 0:
+                _draw_input_row("Stone", _fmt_job_slip_weight(st))
+            if eh > 0:
+                _draw_input_row("EH/Enamel", _fmt_job_slip_weight(eh))
+            _draw_input_row("Net", _fmt_job_slip_weight(giving_net))
+            total_net = giving_net
+
+        lh_tot_l = _font_line_h(F_TXT_B)
+        lh_tot_w = _font_line_h(F_JC_WEIGHT_B)
+        rht = max(lh_tot_l, lh_tot_w)
+        _draw_text(draw, box_x0 + in_pad_x, y + (rht - lh_tot_l) // 2, "Total weight:", F_TXT_B)
+        _draw_text_right(draw, box_x1 - in_pad_x, y + (rht - lh_tot_w) // 2, _fmt_job_slip_weight(total_net), F_JC_WEIGHT_B)
+        y += rht + 10
+
+    # FINISHED ITEM
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 10
+    t_fi = "FINISHED ITEM"
+    twf = _text_w(draw, t_fi, F_TXT_B)
+    _draw_text_center(draw, box_x0 + box_w / 2, y, t_fi, F_TXT_B)
+    y += _font_line_h(F_TXT_B) + 4
+    draw.line((box_x0 + box_w / 2 - twf / 2, y, box_x0 + box_w / 2 + twf / 2, y), fill=0, width=1)
+    y += 12
+
+    # FINISHED ITEM: left-to-right — Unit weight | Item name | Qty | Process (wrap item + process; small F_TXT)
+    x_l = box_x0 + in_pad_x
+    x_r = box_x1 - in_pad_x
+    w_wt = 96
+    w_qty = 28
+    gap_c = 8
+    # [wt][item][qty][proc] with gaps between each
+    inner = (x_r - x_l) - w_wt - w_qty - 3 * gap_c
+    w_item = max(60, int(inner * 0.55))
+    w_proc = inner - w_item
+    if w_proc < 60:
+        w_proc = 60
+        w_item = max(60, inner - w_proc)
+    x_item = x_l + w_wt + gap_c
+    x_qty = x_item + w_item + gap_c
+    x_proc = x_qty + w_qty + gap_c
+    w_proc_px = x_r - x_proc
+    lh_fi = _font_line_h(F_TXT)
+    line_step = lh_fi + 2
+    # Hide process column when it repeats the previous row (same string as line above)
+    _prev_finished_proc = None
+
+    for r in finished_rows:
+        if not isinstance(r, dict):
+            continue
+        unit_wt = _fmt_job_slip_weight(r.get("unitWeight"))
+        try:
+            q = int(r.get("quantity") or 1)
+        except Exception:
+            q = 1
+        q_disp = str(q) if q <= 99 else "99"
+        nm = _safe_str(r.get("itemName")) or "-"
+        row_proc = _safe_str(r.get("processName")) if isinstance(r, dict) else ""
+        proc_text = row_proc if row_proc else process_name_default
+        item_lines = _wrap_line_px(nm, draw, F_TXT, w_item)
+        if _prev_finished_proc is not None and proc_text == _prev_finished_proc:
+            proc_lines = []
+        else:
+            proc_lines = _wrap_line_px(proc_text, draw, F_TXT, w_proc_px)
+            if not proc_lines:
+                proc_lines = ["-"]
+            _prev_finished_proc = proc_text
+        if not item_lines:
+            item_lines = ["-"]
+        n_lines = max(len(item_lines), len(proc_lines), 1)
+
+        row_top = y
+        for i in range(n_lines):
+            yy = row_top + i * line_step
+            if i == 0:
+                _draw_text_right(draw, x_l + w_wt, yy, unit_wt, F_TXT)
+                _draw_text(draw, x_qty, yy, q_disp, F_TXT)
+            if i < len(item_lines):
+                _draw_text(draw, x_item, yy, item_lines[i], F_TXT)
+            if i < len(proc_lines):
+                _draw_text(draw, x_proc, yy, proc_lines[i], F_TXT)
+        y = row_top + n_lines * line_step + 8
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 8
+    box_y1 = y + 8
+    draw.rectangle((box_x0, box_y0, box_x1, box_y1), outline=0, width=1)
+
+    img = img.crop((0, 0, W, min(H, box_y1 + 14)))
+    return _to_1bit_floyd_steinberg(img)
+
 
 # ==========================
 # SLIPS PRINTING ENDPOINTS
@@ -2243,6 +2603,32 @@ def print_receiving_metal_slip_raster():
         return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
     except Exception as e:
         log(f"/print-receiving-metal-slip-raster error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/print-job-create-slip-raster", methods=["POST"])
+def print_job_create_slip_raster():
+    data = request.get_json(force=True, silent=True) or {}
+    printer = data.get("printer")
+    if not printer:
+        return jsonify({"ok": False, "error": "missing 'printer'"}), 400
+
+    try:
+        img1 = _render_job_create_slip_image_80mm(data)
+        parts = [b"\x1b@", _img_to_escpos_raster(img1), b"\r\n"]
+
+        feed_lines = int(data.get("feedLines", 3))
+        cut = bool(data.get("cut", True))
+        cut_mode = str(data.get("cutMode", "full")).lower()
+
+        if cut:
+            parts.append(_esc_feed(feed_lines))
+            parts.append(_esc_cut(cut_mode))
+
+        _write_raw(printer, b"".join(parts))
+        return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
+    except Exception as e:
+        log(f"/print-job-create-slip-raster error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
