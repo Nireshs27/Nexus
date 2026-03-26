@@ -1743,8 +1743,8 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
         is_pure = True
 
 
-    # title = "Rate Slip Format - For Pure Account" if is_pure else "Rate Slip Format - For Non-Pure Account"
-    title = "Rate Slip Format"
+    # title = "Rate Slip - For Pure Account" if is_pure else "Rate Slip - For Non-Pure Account"
+    title = "Rate Slip"
 
     # Fonts (reuse packing list style)
     F_RS_TITLE = F_HDR           # 26 bold
