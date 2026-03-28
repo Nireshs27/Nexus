@@ -1186,6 +1186,8 @@ def _render_multirow_packing_list_image_80mm(data: dict) -> Image.Image:
     if not isinstance(rows, list):
         rows = []
 
+    recipient_slip = _safe_str(data.get("recipient"))
+
     # -------------------------
     # spacing / sizing
     # -------------------------
@@ -1223,26 +1225,38 @@ def _render_multirow_packing_list_image_80mm(data: dict) -> Image.Image:
     h_hdr = _font_line_h(F_PL_ROW_B)
     h_row = _font_line_h(F_PL_ROW)
 
+    def _multirow_pl_left_lines(r: dict) -> list:
+        """Match single packing list: shop+order → two lines; order-only → one line; no stray '/'."""
+        sh_code = _safe_str(
+            r.get("shCode")
+            or r.get("partyShortCode")
+            or r.get("partyAccountShortCode")
+            or r.get("code")
+        )
+        order_no = _safe_str(r.get("orderNo"))
+        branch_code = _safe_str(r.get("branchCode"))
+        if recipient_slip:
+            ru = recipient_slip.upper()
+            if sh_code and sh_code.upper() == ru:
+                sh_code = ""
+            if branch_code and branch_code.upper() == ru:
+                branch_code = ""
+        if sh_code and order_no:
+            return [f"{sh_code} /", order_no]
+        if order_no:
+            return [order_no]
+        if sh_code:
+            return [sh_code, branch_code] if branch_code else [sh_code]
+        if branch_code:
+            return [branch_code]
+        return [""]
+
     # -------------------------
     # height estimation
     # -------------------------
     rows_h = 0
     for r in rows:
-        sh_code = _safe_str(r.get("shCode") or r.get("partyShortCode") or r.get("partyAccountShortCode") or r.get("code"))
-        order_no = _safe_str(r.get("orderNo"))
-        branch_code = _safe_str(r.get("branchCode"))
-
-        left_lines = []
-        if sh_code:
-            left_lines.append(sh_code)
-
-        if order_no:
-            left_lines.append(f"/ {order_no}")
-        elif branch_code:
-            left_lines.append(f"/ {branch_code}")
-
-        if not left_lines:
-            left_lines = [""]
+        left_lines = _multirow_pl_left_lines(r)
 
         unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
         shortn = _safe_str(r.get("itemShortName") or r.get("productShortName") or r.get("productName") or r.get("product"))
@@ -1323,21 +1337,7 @@ def _render_multirow_packing_list_image_80mm(data: dict) -> Image.Image:
     # rows
     # -------------------------
     for r in rows:
-        sh_code = _safe_str(r.get("shCode") or r.get("partyShortCode") or r.get("partyAccountShortCode") or r.get("code"))
-        order_no = _safe_str(r.get("orderNo"))
-        branch_code = _safe_str(r.get("branchCode"))
-
-        left_lines = []
-        if sh_code:
-            left_lines.append(sh_code)
-
-        if order_no:
-            left_lines.append(f"/ {order_no}")
-        elif branch_code:
-            left_lines.append(f"/ {branch_code}")
-
-        if not left_lines:
-            left_lines = [""]
+        left_lines = _multirow_pl_left_lines(r)
 
         unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
         shortn = _safe_str(r.get("itemShortName") or r.get("productShortName") or r.get("productName") or r.get("product"))
@@ -1603,7 +1603,16 @@ def _render_packing_list_image_80mm(data: dict) -> Image.Image:
         )
         order_no = _safe_str(r.get("orderNo"))
 
-        left_code = f"{party_short_code} /\n{order_no}" if order_no else party_short_code
+        # Row often stores party customer code in party_account_branch_code — same as slip Recipient
+        if recipient and party_short_code and party_short_code.upper() == recipient.upper():
+            party_short_code = ""
+
+        if party_short_code and order_no:
+            left_code = f"{party_short_code} /\n{order_no}"
+        elif order_no:
+            left_code = order_no
+        else:
+            left_code = party_short_code
 
         unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
         shortn = _safe_str(
@@ -1858,8 +1867,9 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     col_prod_x   = box_x0 + in_pad
     col_qty_r    = box_x0 + int(box_w * 0.42)   # Qty
     col_net_r    = box_x0 + int(box_w * 0.62)   # Net Wt
-    col_mid_r    = box_x0 + int(box_w * 0.80)   # Touch/Wastage
-    col_pure_r   = box_x1 - in_pad              # Pure Wt
+    # Give extra space between Wastage and MC headers in Non-Pure layout
+    col_mid_r    = box_x0 + int(box_w * (0.80 if is_pure else 0.77))   # Touch/Wastage
+    col_last_r   = box_x1 - in_pad              # Pure Wt or MC Pc/Gm
 
     # Header positions (left for labels, right for numeric headers)
     h_prod = _draw_multiline(draw, col_prod_x, y, "Unit Wt\nProduct Name", F_RS_ROW_B, line_gap=2)
@@ -1872,9 +1882,17 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     mid_title = "Touch\n%" if is_pure else "Wastage\n%"
     h_mid = _draw_multiline(draw, col_mid_r - int(_text_w(draw, "Wastage", F_RS_ROW_B)), y, mid_title, F_RS_ROW_B, line_gap=2)
 
-    h_pure = _draw_multiline(draw, col_pure_r - int(_text_w(draw, "Pure Wt", F_RS_ROW_B)), y, "Pure Wt\n(gms)", F_RS_ROW_B, line_gap=2)
+    if is_pure:
+        last_title = "Pure Wt\n(gms)"
+        last_title_x = col_last_r - int(_text_w(draw, "Pure Wt", F_RS_ROW_B))
+        h_last = _draw_multiline(draw, last_title_x, y, last_title, F_RS_ROW_B, line_gap=2)
+    else:
+        last_title = "MC Pc/Gm"
+        last_title_x = col_last_r - int(_text_w(draw, last_title, F_RS_ROW_B))
+        _draw_text(draw, last_title_x, y + int((table_header_h - _font_line_h(F_RS_ROW_B)) / 2), last_title, F_RS_ROW_B)
+        h_last = _font_line_h(F_RS_ROW_B)
 
-    y += max(h_prod, h_net, h_mid, h_pure) + 8
+    y += max(h_prod, h_net, h_mid, h_last) + 8
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
     y += 10
 
@@ -1906,6 +1924,19 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
             )
 
         pure = _safe_str(r.get("pureWt")) or _safe_str(r.get("pureWeight"))
+        mc_pc = _safe_str(r.get("mcPerPc")) or _safe_str(r.get("mc_per_pc"))
+        mc_gm = _safe_str(r.get("mcPerGm")) or _safe_str(r.get("mc_per_gm"))
+        if is_pure:
+            last_val = pure
+        else:
+            if mc_pc and mc_gm:
+                last_val = f"{mc_pc}/{mc_gm}"
+            elif mc_pc:
+                last_val = f"{mc_pc}/-"
+            elif mc_gm:
+                last_val = f"-/{mc_gm}"
+            else:
+                last_val = ""
 
         prod_lines = wrap2(prod, max_prod_px, F_RS_ROW)
 
@@ -1913,7 +1944,7 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
         _draw_text_right(draw, col_qty_r, y, qty, F_RS_ROW)
         _draw_text_right(draw, col_net_r, y, net, F_RS_ROW)
         _draw_text_right(draw, col_mid_r, y, mid, F_RS_ROW)
-        _draw_text_right(draw, col_pure_r, y, pure, F_RS_ROW)
+        _draw_text_right(draw, col_last_r, y, last_val, F_RS_ROW)
 
         y += table_row_h
 
@@ -1940,7 +1971,7 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     if total_gross:
         _draw_text_center(draw, box_x0 + box_w/2, y, f"Total Gross Weight (gms):  {total_gross}", F_RS_INFO)
         y += h_info + totals_gap_y
-    if total_pure:
+    if is_pure and total_pure:
         _draw_text_center(draw, box_x0 + box_w/2, y, f"Total Pure Weight (gms):  {total_pure}", F_RS_INFO)
         y += h_info + totals_gap_y
 
