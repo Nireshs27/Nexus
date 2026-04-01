@@ -722,17 +722,30 @@ def _render_receiving_metal_slip_image_80mm(data: dict) -> Image.Image:
     box_x1 = box_x0 + box_w
 
     y = top_pad
-    H = 650
+    H = 720
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
 
     box_y0 = y
 
-    # Header
+    slip_title = _safe_str(data.get("slipTitle")) or "Metal Receiving"
+    pad_after_title = 12
+    h_title = _font_line_h(F_HDR)
+
     y += 10
-    _draw_text(draw, box_x0 + in_pad_x, y, _safe_str(data.get("accountCode")), F_HDR)
-    _draw_text_right(draw, box_x1 - in_pad_x, y, _safe_str(data.get("date")), F_TXT)
-    y += 36
+    _draw_text_center(draw, box_x0 + box_w / 2, y, slip_title, F_HDR)
+    y += h_title + pad_after_title
+
+    # Header: full row account + date (default), or date-only right (Job Control reference)
+    header_style = str(data.get("headerStyle") or "accountDate").strip().lower()
+    date_str = _safe_str(data.get("date"))
+    if header_style == "titledateonly":
+        _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
+        y += 36
+    else:
+        _draw_text(draw, box_x0 + in_pad_x, y, _safe_str(data.get("accountCode")), F_HDR)
+        _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
+        y += 36
 
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
     y += 12
@@ -949,6 +962,25 @@ def _draw_value_with_unit_centered(
     draw.text((x + w_val + gap, y), unit_text, font=unit_font, fill=0)
 
 
+def _draw_value_with_unit_right(
+    draw, x_right, y, val_text, val_font,
+    unit_text="gms", unit_font=None, gap=6,
+):
+    """Right-aligned value + unit: large val_font, normal unit_font (e.g. metal giving weight column)."""
+    val_text = _safe_str(val_text)
+    unit_text = _safe_str(unit_text)
+    unit_font = unit_font or F_TXT
+    w_val = draw.textlength(val_text, font=val_font)
+    w_unit = draw.textlength(unit_text, font=unit_font)
+    x_unit = x_right - w_unit
+    x_val = x_unit - gap - w_val
+    lh_val = _font_line_h(val_font)
+    lh_unit = _font_line_h(unit_font)
+    y_unit = y + max(0, (lh_val - lh_unit) // 2)
+    draw.text((x_val, y), val_text, font=val_font, fill=0)
+    draw.text((x_unit, y_unit), unit_text, font=unit_font, fill=0)
+
+
 def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
 
@@ -1014,6 +1046,12 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     if date_str:
         # _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
         _draw_text_right(draw, box_x1 - in_pad_x - 80, y, date_str, F_TXT)
+
+    repair_sample_tag = _safe_str(
+        data.get("repairSampleTag") or data.get("repair_sample_tag")
+    )
+    if repair_sample_tag:
+        _draw_text_center(draw, box_x0 + box_w / 2, y, repair_sample_tag, F_TXT)
 
     y += gap_after_header
 
@@ -1083,7 +1121,7 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     # -------------------------
     # Item / product line
     # -------------------------
-    unitwt = _safe_str(data.get("unitWt") or data.get("unitWeight"))
+    unitwt = _safe_str(data.get("unitWt") or data.get("unitWeight")).strip()
     item_name = _safe_str(
         data.get("itemShortName")
         or data.get("productShortName")
@@ -1091,7 +1129,18 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
         or data.get("productName")
         or data.get("product")
     )
-    item_text = f"{unitwt}-{item_name}".strip("-").strip()
+    item_name = item_name.rstrip("-").strip()
+    model_mt = _safe_str(data.get("modelType") or data.get("model_type")).strip()
+    parts = []
+    if unitwt:
+        parts.append(unitwt)
+    if item_name:
+        parts.append(item_name)
+    base = "-".join(parts) if parts else ""
+    if model_mt:
+        item_text = f"{base}-{model_mt}" if base else model_mt
+    else:
+        item_text = base
 
     usable_w = box_w - (in_pad_x * 2)
     lines = _wrap_line_px(item_text, draw, F_TXT_B, usable_w)
@@ -2578,6 +2627,242 @@ def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
     return _to_1bit_floyd_steinberg(img)
 
 
+def _metal_giving_weight_num(s) -> str:
+    """Plain numeric weight for metal_giving slip gross/net column (no unit suffix)."""
+    t = _safe_str(s)
+    if not t or t == "-":
+        return "-"
+    m = re.search(r"(\d+(?:\.\d+)?)", t)
+    return m.group(1) if m else "-"
+
+
+def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
+    """
+    metal_giving_slip — title Metal Giving, job code + datetime, worker circles,
+    table: unit wt, item, gross wt/net column header "Gross wt/ Net wt" (single net-or-gross value + gms), Qty total footer.
+
+    Optional receivingKind scrap | sannam: compact two-column table (Item + weight column only), no tagline
+    under title, no qty line, no Type footer. Omit for finished goods (generic Metal Receiving layout).
+    """
+    W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
+    margin_x = 18
+    top_pad = 14
+    in_pad_x = 14
+    box_x0 = margin_x
+    box_x1 = W - margin_x
+    box_w = box_x1 - box_x0
+
+    job_code = _safe_str(data.get("jobCode")) or "-"
+    date_time = _safe_str(data.get("dateTime")) or "-"
+
+    workers_in = data.get("workers")
+    if not isinstance(workers_in, list) or len(workers_in) == 0:
+        workers_in = [{"name": "NA"}]
+
+    rows_in = data.get("rows") or []
+    if not isinstance(rows_in, list):
+        rows_in = []
+
+    H = 4000
+    img = Image.new("L", (W, H), 255)
+    draw = ImageDraw.Draw(img)
+    y = top_pad
+    box_y0 = y
+
+    slip_title = _safe_str(data.get("slipTitle")) or "Metal Giving"
+    receiving_kind = _safe_str(data.get("receivingKind")).lower()
+    compact_scrap_sannam = receiving_kind in ("scrap", "sannam")
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 10
+    _draw_text_center(draw, box_x0 + box_w / 2, y, slip_title, F_HDR)
+    y += _font_line_h(F_HDR) + 6
+    y += 2
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 14
+
+    _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
+    _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
+    y += _font_line_h(F_TXT) + 10
+
+    worker_entries = []
+    for w in workers_in:
+        if not isinstance(w, dict):
+            continue
+        nm = _safe_str(w.get("name")) or "-"
+        b64 = w.get("imageB64")
+        worker_entries.append({"name": nm, "b64": b64 if isinstance(b64, str) else None})
+
+    if not worker_entries:
+        worker_entries = [{"name": "NA", "b64": None}]
+
+    thumb_base = int(round(56 * 1.6))
+    gap_after_workers = 10
+    F_NAME = F_TXT
+    lh_name = _font_line_h(F_NAME)
+    cx_page = box_x0 + box_w / 2
+    wrap_w_names = max(60, int(box_w - 2 * in_pad_x))
+
+    n_workers = len(worker_entries)
+
+    if n_workers == 1:
+        thumb_size = thumb_base
+        ent = worker_entries[0]
+        gx = int(cx_page - thumb_size / 2)
+        im = _decode_worker_thumb_b64(ent["b64"] or "")
+        if im:
+            _paste_worker_thumb_circle_job_create_slip(img, gx, y, im, thumb_size)
+        else:
+            _draw_worker_initials_circle_job_create_slip(draw, gx, y, thumb_size, ent["name"], F_TXT_B)
+        y += thumb_size + gap_after_workers
+        name_plain = _safe_str(ent.get("name")) or "-"
+        lines = _wrap_line_px(name_plain, draw, F_NAME, wrap_w_names) or ["-"]
+        for ln in lines:
+            _draw_text_center(draw, cx_page, y, ln, F_NAME)
+            y += lh_name + 2
+    else:
+        thumb_m = thumb_base
+        step = max(1, int(thumb_m * 0.9))
+        max_inner = int(box_w - 2 * in_pad_x)
+        while thumb_m > 32:
+            total_w = thumb_m + (n_workers - 1) * step
+            if total_w <= max_inner:
+                break
+            thumb_m = max(32, int(thumb_m * 0.9))
+            step = max(1, int(thumb_m * 0.9))
+        total_w = thumb_m + (n_workers - 1) * step
+        start_gx = int(cx_page - total_w / 2)
+        row_top = y
+        for i, ent in enumerate(worker_entries):
+            gx_i = start_gx + i * step
+            im = _decode_worker_thumb_b64(ent["b64"] or "")
+            if im:
+                _paste_worker_thumb_circle_job_create_slip(img, gx_i, row_top, im, thumb_m)
+            else:
+                _draw_worker_initials_circle_job_create_slip(draw, gx_i, row_top, thumb_m, ent["name"], F_TXT_B)
+        y = row_top + thumb_m + gap_after_workers
+        combined = ", ".join(_safe_str(e.get("name")) or "-" for e in worker_entries)
+        lines = _wrap_line_px(combined, draw, F_NAME, wrap_w_names) or ["-"]
+        for ln in lines:
+            _draw_text_center(draw, cx_page, y, ln, F_NAME)
+            y += lh_name + 2
+
+    y += 6
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 10
+
+    inner_w = box_w - 2 * in_pad_x
+    gap_c = 11
+    col_gn_right = box_x1 - in_pad_x
+
+    if compact_scrap_sannam:
+        w_gn = 200
+        w_item = inner_w - w_gn - gap_c
+        if w_item < 100:
+            w_item = 100
+            w_gn = max(160, inner_w - w_item - gap_c)
+        x_i = box_x0 + in_pad_x
+        x_g = x_i + w_item + gap_c
+        x_u = x_i
+    else:
+        w_unit = 104
+        w_gn = 200
+        w_item = inner_w - w_unit - w_gn - 2 * gap_c
+        if w_item < 80:
+            w_item = 80
+            w_gn = inner_w - w_unit - w_item - 2 * gap_c
+            w_gn = max(160, w_gn)
+        x_u = box_x0 + in_pad_x
+        x_i = x_u + w_unit + gap_c
+        x_g = x_i + w_item + gap_c
+
+    lh = _font_line_h(F_TXT)
+    line_step = lh + 2
+    lh_wt_line = _font_line_h(F_JC_WEIGHT_B)
+
+    if compact_scrap_sannam:
+        _draw_text(draw, x_i, y, "Item", F_TXT_B)
+    else:
+        _draw_text(draw, x_u, y, "Unit wt", F_TXT_B)
+        _draw_text(draw, x_i, y, "Item", F_TXT_B)
+    hdr_gn_base = "Gross wt/ Net wt"
+    hdr_gn_lines = _wrap_line_px(hdr_gn_base, draw, F_TXT_B, w_gn) or [hdr_gn_base]
+    for hln in hdr_gn_lines:
+        _draw_text(draw, x_g, y, hln, F_TXT_B)
+        y += lh + 2
+    y += 2
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 8
+
+    total_qty = 0
+    for r in rows_in:
+        if not isinstance(r, dict):
+            continue
+        uw = _safe_str(r.get("unitWt")) or "-"
+        nm = _safe_str(r.get("itemName")) or "-"
+        qraw = r.get("qty")
+        if not compact_scrap_sannam:
+            try:
+                if qraw is None or qraw == "":
+                    total_qty += 1
+                else:
+                    total_qty += int(float(str(qraw)))
+            except Exception:
+                total_qty += 1
+        gw = _metal_giving_weight_num(r.get("grossWt"))
+        nw = _metal_giving_weight_num(r.get("netWt"))
+        # Single value: prefer net metal weight; else gross (no duplicate gross/net pair)
+        wt_one = nw if nw != "-" else gw
+
+        item_lines = _wrap_line_px(nm, draw, F_TXT, w_item) or ["-"]
+        row_top = y
+
+        if not compact_scrap_sannam:
+            _draw_text(draw, x_u, row_top, uw[:18], F_TXT)
+
+        item_lines_h = max(1, len(item_lines)) * line_step
+        gn_block_h = lh_wt_line + 6
+        item_block_h = max(item_lines_h, gn_block_h)
+
+        for i in range(len(item_lines)):
+            _draw_text(draw, x_i, row_top + i * line_step, item_lines[i][:120], F_TXT)
+
+        if wt_one == "-":
+            _draw_text_right(draw, col_gn_right, row_top, "-", F_JC_WEIGHT_B)
+        else:
+            _draw_value_with_unit_right(
+                draw, col_gn_right, row_top, wt_one[:24], F_JC_WEIGHT_B,
+                unit_text="gms", unit_font=F_TXT, gap=6,
+            )
+
+        y = row_top + item_block_h + 8
+        draw.line((box_x0, y - 4, box_x1, y - 4), fill=0, width=1)
+
+    if len(rows_in) == 0:
+        if receiving_kind == "scrap":
+            empty_txt = "(no scrap lines)"
+        elif receiving_kind == "sannam":
+            empty_txt = "(no sannam lines)"
+        else:
+            empty_txt = "(no giving lines)"
+        _draw_text(draw, x_i if compact_scrap_sannam else x_u, y, empty_txt, F_TXT)
+        y += line_step + 4
+    else:
+        y += 6
+        if not compact_scrap_sannam:
+            qty_line = f"Qty : {total_qty}"
+            _draw_text(draw, box_x0 + in_pad_x, y, qty_line, F_TXT_B)
+            y += _font_line_h(F_TXT_B) + 6
+
+    y += 4
+    box_y1 = y + 8
+    draw.rectangle((box_x0, box_y0, box_x1, box_y1), outline=0, width=1)
+
+    img = img.crop((0, 0, W, min(H, box_y1 + 14)))
+    return _to_1bit_floyd_steinberg(img)
+
+
 # ==========================
 # SLIPS PRINTING ENDPOINTS
 # ==========================
@@ -2660,6 +2945,32 @@ def print_job_create_slip_raster():
         return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
     except Exception as e:
         log(f"/print-job-create-slip-raster error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/print-metal-giving-slip-raster", methods=["POST"])
+def print_metal_giving_slip_raster():
+    data = request.get_json(force=True, silent=True) or {}
+    printer = data.get("printer")
+    if not printer:
+        return jsonify({"ok": False, "error": "missing 'printer'"}), 400
+
+    try:
+        img1 = _render_metal_giving_slip_image_80mm(data)
+        parts = [b"\x1b@", _img_to_escpos_raster(img1), b"\r\n"]
+
+        feed_lines = int(data.get("feedLines", 3))
+        cut = bool(data.get("cut", True))
+        cut_mode = str(data.get("cutMode", "full")).lower()
+
+        if cut:
+            parts.append(_esc_feed(feed_lines))
+            parts.append(_esc_cut(cut_mode))
+
+        _write_raw(printer, b"".join(parts))
+        return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
+    except Exception as e:
+        log(f"/print-metal-giving-slip-raster error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
