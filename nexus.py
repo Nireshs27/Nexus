@@ -1945,7 +1945,7 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     col_last_r   = box_x1 - in_pad              # Pure Wt or MC Pc/Gm
 
     # Header positions (left for labels, right for numeric headers)
-    h_prod = _draw_multiline(draw, col_prod_x, y, "Unit Wt\nProduct Name", F_RS_ROW_B, line_gap=2)
+    h_prod = _draw_multiline(draw, col_prod_x, y, "Unit Wt\nP Sh Name", F_RS_ROW_B, line_gap=2)
 
     qty_y = y + int((max(h_prod, table_header_h) - _font_line_h(F_RS_ROW_B)) / 2)
     _draw_text_right(draw, col_qty_r, qty_y, "Qty", F_RS_ROW_B)
@@ -1975,7 +1975,12 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     max_prod_px = (col_qty_r - 14) - col_prod_x
 
     for r in rows:
-        prod = _safe_str(r.get("productName")) or _safe_str(r.get("product"))
+        prod = (
+            _safe_str(r.get("itemShortName")) or
+            _safe_str(r.get("productShortName")) or
+            _safe_str(r.get("productName")) or
+            _safe_str(r.get("product"))
+        )
         unitwt = _safe_str(r.get("unitWt")) or _safe_str(r.get("unitWeight"))
         if unitwt and prod:
             prod = f"{unitwt} {prod}".strip()
@@ -2395,6 +2400,7 @@ def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
 
     job_code = _safe_str(data.get("jobCode")) or "-"
     date_time = _safe_str(data.get("dateTime")) or "-"
+    customer_flag = _safe_str(data.get("customerFlag"))
     # Default process when a finished row omits processName (job-level from client)
     process_name_default = _safe_str(data.get("processName")) or "-"
 
@@ -2446,6 +2452,9 @@ def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
     _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
     _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
     y += _font_line_h(F_TXT) + 10
+    if customer_flag:
+        _draw_text(draw, box_x0 + in_pad_x, y, customer_flag, F_TXT_B)
+        y += _font_line_h(F_TXT_B) + 8
 
     # Workers: sketch layout — 1 worker = centered circle + name below; 2+ = overlapping circles + comma names
     worker_entries = []
@@ -2678,6 +2687,7 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
 
     job_code = _safe_str(data.get("jobCode")) or "-"
     date_time = _safe_str(data.get("dateTime")) or "-"
+    customer_flag = _safe_str(data.get("customerFlag"))
 
     workers_in = data.get("workers")
     if not isinstance(workers_in, list) or len(workers_in) == 0:
@@ -2709,6 +2719,9 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
     _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
     _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
     y += _font_line_h(F_TXT) + 10
+    if customer_flag:
+        _draw_text(draw, box_x0 + in_pad_x, y, customer_flag, F_TXT_B)
+        y += _font_line_h(F_TXT_B) + 8
 
     worker_entries = []
     for w in workers_in:
