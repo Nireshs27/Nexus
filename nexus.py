@@ -61,6 +61,30 @@ def log(msg: str):
         pass
 
 
+# region agent log
+_AGENT_DEBUG_LOG = Path(r"c:\Users\KSAN\Desktop\Projects\Goldtrackerpro\.cursor\debug.log")
+
+
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str = ""):
+    """NDJSON append for debug mode (no secrets)."""
+    try:
+        _AGENT_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "timestamp": int(datetime.now().timestamp() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "hypothesisId": hypothesis_id,
+        }
+        with open(_AGENT_DEBUG_LOG, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
+
+
 def load_or_create_config():
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -3276,6 +3300,23 @@ def _parse_weight(line: str):
         return None, unit
 
 
+def _serial_port_open_error_message(exc: BaseException, port: str) -> str:
+    """User-facing text for serial open failures (avoid raw Python tracebacks in UI)."""
+    msg = str(exc).lower()
+    if isinstance(exc, FileNotFoundError):
+        return (
+            f"COM port not found ({port}) — check Device Manager and PC Management scale port"
+        )
+    if "filenotfounderror" in msg or "cannot find the file" in msg or "the system cannot find the file" in msg:
+        return (
+            f"COM port not found ({port}) — check Device Manager and PC Management scale port"
+        )
+    err = str(exc)
+    if "Access is denied" in err or type(exc).__name__ == "PermissionError":
+        return f"Port {port} is in use or access denied"
+    return f"open failed: {exc}"
+
+
 class ScaleReader:
     def __init__(self):
         self._t: Optional[threading.Thread] = None
@@ -3344,7 +3385,7 @@ class ScaleReader:
                     port=port,
                     baud=baud,
                     mode=mode,
-                    error=f"open failed: {e}",
+                    error=_serial_port_open_error_message(e, port),
                 )
                 time.sleep(0.2)
                 continue
@@ -3841,6 +3882,8 @@ def _render_delivery_challan_pdf_reportlab(
     s_small  = ParagraphStyle("s", parent=styles["Normal"], fontName=base_font, fontSize=8.5, leading=9.5)
     s_small_b = ParagraphStyle("sb", parent=styles["Normal"], fontName=bold_font, fontSize=8.5, leading=9.5)
     s_small_b_center = ParagraphStyle("sbc", parent=s_small_b, alignment=1)
+    # alignment 2 = TA_RIGHT (second line under DC No, right column)
+    s_small_b_right = ParagraphStyle("sbr", parent=s_small_b, alignment=2)
 
     def P(txt, style=s_normal):
         return Paragraph((_safe_str(txt)).replace("\n", "<br/>"), style)
@@ -3961,6 +4004,7 @@ def _render_delivery_challan_pdf_reportlab(
         # DATA
         date_str = _safe_str(data.get("date"))
         dc_no = _safe_str(data.get("dcNo"))
+        challan_kind = _safe_str(data.get("challanKind"))
 
         own = data.get("own") or {}
         party = data.get("party") or {}
@@ -3988,11 +4032,85 @@ def _render_delivery_challan_pdf_reportlab(
         party_email = _safe_str(party.get("email") or data.get("partyEmail"))
         party_phone = _safe_str(party.get("phone") or data.get("partyPhone"))
 
-        # LEFT block (Date + Own)  ✅ keep OWN on LEFT
+        # First row: Date (left) | gutter | DC No + Sample/Repair (right, same baseline)
+        if date_str or dc_no or challan_kind:
+            date_cell = P(f"<b>Date :</b>&nbsp;&nbsp;{date_str}", s_small) if date_str else ""
+            if dc_no and challan_kind:
+                _rw_l = right_w * 0.58
+                _rw_r = right_w - _rw_l
+                right_meta = Table(
+                    [
+                        [
+                            P(f"<b>DC No:</b>&nbsp;&nbsp;{dc_no}", s_small),
+                            P(f"<b>{challan_kind.upper()}</b>", s_small_b_right),
+                        ]
+                    ],
+                    colWidths=[_rw_l, _rw_r],
+                )
+                right_meta.setStyle(
+                    TableStyle(
+                        [
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                            ("TOPPADDING", (0, 0), (-1, -1), 0),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                        ]
+                    )
+                )
+            elif dc_no:
+                right_meta = Table(
+                    [[P(f"<b>DC No:</b>&nbsp;&nbsp;{dc_no}", s_small)]],
+                    colWidths=[right_w],
+                )
+                right_meta.setStyle(
+                    TableStyle(
+                        [
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                            ("TOPPADDING", (0, 0), (-1, -1), 0),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                        ]
+                    )
+                )
+            elif challan_kind:
+                right_meta = Table(
+                    [[P(f"<b>{challan_kind.upper()}</b>", s_small_b_right)]],
+                    colWidths=[right_w],
+                )
+                right_meta.setStyle(
+                    TableStyle(
+                        [
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                            ("TOPPADDING", (0, 0), (-1, -1), 0),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                        ]
+                    )
+                )
+            else:
+                right_meta = ""
+
+            meta_tbl = Table([[date_cell, "", right_meta]], colWidths=[left_w, gutter, right_w])
+            meta_tbl.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                        ("TOPPADDING", (0, 0), (-1, -1), 0),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                    ]
+                )
+            )
+            story.append(meta_tbl)
+            story.append(Spacer(1, 2 * mm))
+
+        # LEFT block (Own only — Date is in meta row above)
         left_block = []
-        if date_str:
-            left_block.append(P(f"<b>Date :</b>&nbsp;&nbsp;{date_str}", s_small))
-            left_block.append(Spacer(1, 2 * mm))  # ✅ space below Date
         left_block.append(P(f"<b>{own_name}</b>", s_bold))
         left_block.append(P(own_addr, s_normal))
         if own_gst:
@@ -4002,11 +4120,8 @@ def _render_delivery_challan_pdf_reportlab(
         if own_phone:
             left_block.append(P(f"Phone : {own_phone}", s_normal))
 
-        # RIGHT block (DC No + Party) ✅ keep PARTY on RIGHT
+        # RIGHT block (Party only — DC No / Sample / Repair are in meta row above)
         right_block = []
-        if dc_no:
-            right_block.append(P(f"<b>DC No:</b>&nbsp;&nbsp;{dc_no}", s_small))
-            right_block.append(Spacer(1, 2 * mm))  # ✅ space below DC No
         right_block.append(P(f"<b><u>{party_heading}</u></b>", s_bold))
         right_block.append(P(party_name, s_normal))
         right_block.append(P(party_addr, s_normal))
@@ -4226,9 +4341,25 @@ def print_delivery_challan_a4():
     data = request.get_json(force=True, silent=True) or {}
 
     printer = data.get("printer")
-    save_dir = Path(data.get("saveDir") or "")
+    save_dir_raw = data.get("saveDir") or ""
+    save_dir = Path(save_dir_raw)
     file_name = data.get("fileName") or ""
     sumatra = data.get("sumatraPath") or ""
+
+    # region agent log
+    sdr = str(save_dir_raw)
+    _agent_debug_log(
+        "nexus.py:print_delivery_challan_a4",
+        "validated_inputs",
+        {
+            "saveDirLen": len(sdr),
+            "saveDirStartsUnc": sdr.lstrip().startswith("\\\\") or sdr.lstrip().startswith("//"),
+            "saveDirDoubleSlashCount": sdr.count("\\\\"),
+            "pathAsStr": str(save_dir)[:200],
+        },
+        "H3",
+    )
+    # endregion
 
     if not printer:
         return jsonify({"ok": False, "error": "missing 'printer'"}), 400
@@ -4237,8 +4368,27 @@ def print_delivery_challan_a4():
     if not sumatra or not Path(sumatra).exists():
         return jsonify({"ok": False, "error": "SumatraPDF not configured"}), 400
 
+    stage = "init"
     try:
+        # region agent log
+        stage = "pre_mkdir"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "before_mkdir",
+            {"stage": stage, "saveDir": str(save_dir)[:200]},
+            "H1",
+        )
+        # endregion
         save_dir.mkdir(parents=True, exist_ok=True)
+        # region agent log
+        stage = "post_mkdir"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "after_mkdir",
+            {"stage": stage},
+            "H1",
+        )
+        # endregion
 
         if not file_name:
             file_name = f"DC-{uuid.uuid4().hex}.pdf"
@@ -4251,14 +4401,50 @@ def print_delivery_challan_a4():
         copies_per_page = int(data.get("copiesPerPage") or 1)
         two_per_page = (copies_per_page == 2)
 
+        # region agent log
+        stage = "pre_render"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "before_pdf_render",
+            {"stage": stage, "outPath": str(out_path)[:220]},
+            "H2",
+        )
+        # endregion
         # ✅ 1) Generate PDF (ONE PAGE if two_per_page=True => top+bottom challans)
         _render_delivery_challan_pdf_reportlab(data, out_path, two_per_page=two_per_page)
+        # region agent log
+        stage = "post_render"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "after_pdf_render",
+            {"stage": stage},
+            "H2",
+        )
+        # endregion
 
+        # region agent log
+        stage = "pre_sumatra"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "before_sumatra",
+            {"stage": stage, "outPath": str(out_path)[:220]},
+            "H5",
+        )
+        # endregion
         # ✅ 2) Print ONLY ONCE (no nup, no copies)
         cmd = [sumatra, "-silent", "-print-to", printer, "-exit-on-print", str(out_path)]
         sp = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if sp.returncode != 0:
             raise RuntimeError(sp.stderr or sp.stdout or f"Sumatra exit {sp.returncode}")
+        # region agent log
+        stage = "post_sumatra"
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "after_sumatra",
+            {"stage": stage},
+            "H5",
+        )
+        # endregion
 
         return jsonify({
             "ok": True,
@@ -4268,6 +4454,21 @@ def print_delivery_challan_a4():
             "twoPerPage": two_per_page
         })
     except Exception as e:
+        # region agent log
+        win_e = getattr(e, "winerror", None)
+        _agent_debug_log(
+            "nexus.py:print_delivery_challan_a4",
+            "exception",
+            {
+                "stage": stage,
+                "errorType": type(e).__name__,
+                "errorStr": str(e)[:500],
+                "winerror": win_e,
+                "errno": getattr(e, "errno", None),
+            },
+            "H4",
+        )
+        # endregion
         log(f"/print-delivery-challan-a4 error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
