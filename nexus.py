@@ -463,6 +463,9 @@ F_TXT_B   = ImageFont.truetype(FONT_BOLD_PATH, 24)
 F_BIG     = ImageFont.truetype(FONT_BOLD_PATH, 50)
 F_BIG_ROW = ImageFont.truetype(FONT_BOLD_PATH, 36)
 F_UNIT    = ImageFont.truetype(FONT_REGULAR_PATH, 20)
+# Job close slip: Net wt header bold 1.2× prior F_UNIT (20→24); numerals bold 1.5× F_TXT_B (24→36)
+F_JC_NET_WT = F_TXT_B
+F_JC_CLOSE_VAL = F_BIG_ROW
 # Job create slip — weight numerals (~2× F_TXT / F_TXT_B)
 F_JC_WEIGHT   = ImageFont.truetype(FONT_REGULAR_PATH, 48)
 F_JC_WEIGHT_B = ImageFont.truetype(FONT_BOLD_PATH, 48)
@@ -1863,13 +1866,21 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
             out.append(cur)
         return out[:2]
 
+    def _rate_slip_unit_plus_short(r: dict) -> str:
+        """Same name resolution as Packing List column 2 (itemShortName → … → productName)."""
+        unitwt = _safe_str(r.get("unitWt") or r.get("unitWeight"))
+        shortn = _safe_str(
+            r.get("itemShortName")
+            or r.get("productShortName")
+            or r.get("productName")
+            or r.get("product")
+        )
+        return f"{unitwt} {shortn}".strip()
+
     # Estimate height (safe)
     extra_wrap = 0
     for r in rows:
-        prod = _safe_str(r.get("productName")) or _safe_str(r.get("product"))
-        unitwt = _safe_str(r.get("unitWt")) or _safe_str(r.get("unitWeight"))
-        if unitwt and prod:
-            prod = f"{unitwt} {prod}".strip()
+        prod = _rate_slip_unit_plus_short(r)
         if len(prod) > 22:
             extra_wrap += (table_row_h - 8)
 
@@ -1945,7 +1956,7 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     col_last_r   = box_x1 - in_pad              # Pure Wt or MC Pc/Gm
 
     # Header positions (left for labels, right for numeric headers)
-    h_prod = _draw_multiline(draw, col_prod_x, y, "Unit Wt\nP Sh Name", F_RS_ROW_B, line_gap=2)
+    h_prod = _draw_multiline(draw, col_prod_x, y, "Unit Wt\nP sh name", F_RS_ROW_B, line_gap=2)
 
     qty_y = y + int((max(h_prod, table_header_h) - _font_line_h(F_RS_ROW_B)) / 2)
     _draw_text_right(draw, col_qty_r, qty_y, "Qty", F_RS_ROW_B)
@@ -1975,15 +1986,7 @@ def _render_rate_slip_image_80mm(data: dict) -> Image.Image:
     max_prod_px = (col_qty_r - 14) - col_prod_x
 
     for r in rows:
-        prod = (
-            _safe_str(r.get("itemShortName")) or
-            _safe_str(r.get("productShortName")) or
-            _safe_str(r.get("productName")) or
-            _safe_str(r.get("product"))
-        )
-        unitwt = _safe_str(r.get("unitWt")) or _safe_str(r.get("unitWeight"))
-        if unitwt and prod:
-            prod = f"{unitwt} {prod}".strip()
+        prod = _rate_slip_unit_plus_short(r)
 
         qty = _safe_str(r.get("qty"))
         net = _safe_str(r.get("netWt")) or _safe_str(r.get("netWeight"))
@@ -2400,7 +2403,6 @@ def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
 
     job_code = _safe_str(data.get("jobCode")) or "-"
     date_time = _safe_str(data.get("dateTime")) or "-"
-    customer_flag = _safe_str(data.get("customerFlag"))
     # Default process when a finished row omits processName (job-level from client)
     process_name_default = _safe_str(data.get("processName")) or "-"
 
@@ -2452,9 +2454,6 @@ def _render_job_create_slip_image_80mm(data: dict) -> Image.Image:
     _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
     _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
     y += _font_line_h(F_TXT) + 10
-    if customer_flag:
-        _draw_text(draw, box_x0 + in_pad_x, y, customer_flag, F_TXT_B)
-        y += _font_line_h(F_TXT_B) + 8
 
     # Workers: sketch layout — 1 worker = centered circle + name below; 2+ = overlapping circles + comma names
     worker_entries = []
@@ -2687,7 +2686,6 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
 
     job_code = _safe_str(data.get("jobCode")) or "-"
     date_time = _safe_str(data.get("dateTime")) or "-"
-    customer_flag = _safe_str(data.get("customerFlag"))
 
     workers_in = data.get("workers")
     if not isinstance(workers_in, list) or len(workers_in) == 0:
@@ -2719,9 +2717,6 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
     _draw_text(draw, box_x0 + in_pad_x, y, job_code, F_TXT)
     _draw_text_right(draw, box_x1 - in_pad_x, y, date_time, F_TXT)
     y += _font_line_h(F_TXT) + 10
-    if customer_flag:
-        _draw_text(draw, box_x0 + in_pad_x, y, customer_flag, F_TXT_B)
-        y += _font_line_h(F_TXT_B) + 8
 
     worker_entries = []
     for w in workers_in:
@@ -2833,11 +2828,17 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
     y += 8
 
     total_qty = 0
+    model_types = []
+    model_types_seen = set()
     for r in rows_in:
         if not isinstance(r, dict):
             continue
         uw = _safe_str(r.get("unitWt")) or "-"
         nm = _safe_str(r.get("itemName")) or "-"
+        mt = _safe_str(r.get("modelType") or r.get("model_type")).strip()
+        if mt and mt not in model_types_seen:
+            model_types_seen.add(mt)
+            model_types.append(mt)
         qraw = r.get("qty")
         if not compact_scrap_sannam:
             try:
@@ -2890,10 +2891,162 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
         if not compact_scrap_sannam:
             qty_line = f"Qty : {total_qty}"
             _draw_text(draw, box_x0 + in_pad_x, y, qty_line, F_TXT_B)
+            if model_types:
+                model_type_footer = ", ".join(model_types)
+                _draw_text_right(draw, box_x1 - in_pad_x, y, model_type_footer[:120], F_TXT_B)
             y += _font_line_h(F_TXT_B) + 6
 
     y += 4
     box_y1 = y + 8
+    draw.rectangle((box_x0, box_y0, box_x1, box_y1), outline=0, width=1)
+
+    img = img.crop((0, 0, W, min(H, box_y1 + 14)))
+    return _to_1bit_floyd_steinberg(img)
+
+
+def _render_job_close_slip_image_80mm(data: dict) -> Image.Image:
+    """
+    job_close_slip — matches handwritten layout:
+    Job Closing Header
+    Worker photo, Name
+    Weights rows
+    Signatures
+    """
+    W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
+    margin_x = 18
+    top_pad = 14
+    box_x0 = margin_x
+    box_x1 = W - margin_x
+    box_w = box_x1 - box_x0
+    jc_pad = 14
+    x_label = box_x0 + jc_pad
+    x_val_right = box_x1 - jc_pad
+    row_gap = 4
+    sec_gap_s = 8
+    sec_gap_after_pl = 18
+    sec_gap_sig_block = 10
+
+    job_code = _safe_str(data.get("jobCode")) or "-"
+    date_time = _safe_str(data.get("dateTime")) or "-"
+
+    worker_name = _safe_str(data.get("workerName")) or "-"
+    worker_b64 = data.get("workerB64")
+
+    val_giving = _metal_giving_weight_num(data.get("totalGiving"))
+    val_received = _metal_giving_weight_num(data.get("totalReceived"))
+    val_finished = _metal_giving_weight_num(data.get("finishedGoods"))
+    val_scrap = _metal_giving_weight_num(data.get("scrap"))
+    val_sannam = _metal_giving_weight_num(data.get("sannam"))
+    val_pl = _metal_giving_weight_num(data.get("processLoss"))
+
+    row_body_h = max(_font_line_h(F_TXT), _font_line_h(F_JC_CLOSE_VAL)) + row_gap
+
+    H = 2000
+    img = Image.new("L", (W, H), 255)
+    draw = ImageDraw.Draw(img)
+    y = top_pad
+    box_y0 = y
+
+    # Job Closing Header
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 10
+    _draw_text_center(draw, box_x0 + box_w / 2, y, "Job Closing", F_HDR)
+    y += _font_line_h(F_HDR) + 6
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += sec_gap_s
+
+    # Job code and Date
+    _draw_text(draw, x_label, y, job_code, F_TXT)
+    _draw_text_right(draw, x_val_right, y, date_time, F_TXT)
+    y += _font_line_h(F_TXT) + sec_gap_s
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += sec_gap_s
+
+    # Worker Avatar and Name
+    cx_page = box_x0 + box_w / 2
+    thumb_size = int(round(56 * 1.6))
+    gx = int(cx_page - thumb_size / 2)
+    im = _decode_worker_thumb_b64(worker_b64 or "")
+    if im:
+        _paste_worker_thumb_circle_job_create_slip(img, gx, y, im, thumb_size)
+    else:
+        _draw_worker_initials_circle_job_create_slip(draw, gx, y, thumb_size, worker_name, F_TXT_B)
+    y += thumb_size + sec_gap_s
+
+    name_max_w = max(40, int(x_val_right - x_label - 8))
+    lines = _wrap_line_px(worker_name, draw, F_TXT_B, name_max_w) or ["-"]
+    for ln in lines:
+        _draw_text_center(draw, cx_page, y, ln, F_TXT_B)
+        y += _font_line_h(F_TXT_B) + 2
+    y += sec_gap_s
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += sec_gap_s
+
+    # METAL SUMMARY (no unit suffix in title) + underline matching title width
+    t_ms = "METAL SUMMARY"
+    tw_ms = _text_w(draw, t_ms, F_TXT_B)
+    _draw_text_center(draw, cx_page, y, t_ms, F_TXT_B)
+    y += _font_line_h(F_TXT_B) + 4
+    draw.line((cx_page - tw_ms / 2, y, cx_page + tw_ms / 2, y), fill=0, width=1)
+    y += sec_gap_s
+
+    # Column header: bold, 1.2× former F_UNIT; same right edge as primary numeric column
+    _draw_text_right(draw, x_val_right, y, "Net wt", F_JC_NET_WT)
+    y += _font_line_h(F_JC_NET_WT) + row_gap
+
+    # Inset breakdown values (finished / scrap / sannam) left by ~8 digit widths
+    w_digit = _text_w(draw, "8", F_JC_CLOSE_VAL)
+    val_inset_breakdown = int(round(8 * w_digit))
+
+    def _jc_weight_nonzero(s: str) -> bool:
+        if not s or s == "-":
+            return False
+        try:
+            return abs(float(s)) > 1e-9
+        except ValueError:
+            return True
+
+    def _metal_row(lbl: str, val: str, *, value_inset: int = 0):
+        nonlocal y
+        vv = val if val != "-" else "-"
+        x_vr = x_val_right - max(0, value_inset)
+        lh_l = _font_line_h(F_TXT)
+        lh_v = _font_line_h(F_JC_CLOSE_VAL)
+        y_lbl = y + max(0, (lh_v - lh_l) // 2)
+        _draw_text(draw, x_label, y_lbl, lbl, F_TXT)
+        _draw_text_right(draw, x_vr, y, vv, F_JC_CLOSE_VAL)
+        y += row_body_h
+
+    _metal_row("Total Metal Given", val_giving)
+    _metal_row("Total Metal Received", val_received)
+    if _jc_weight_nonzero(val_finished):
+        _metal_row("Finished Goods", val_finished, value_inset=val_inset_breakdown)
+    if _jc_weight_nonzero(val_scrap):
+        _metal_row("Scrap", val_scrap, value_inset=val_inset_breakdown)
+    if _jc_weight_nonzero(val_sannam):
+        _metal_row("Sannam", val_sannam, value_inset=val_inset_breakdown)
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += row_gap + 2
+    vv_pl = val_pl if val_pl != "-" else "-"
+    lh_pl_l = _font_line_h(F_TXT_B)
+    lh_pl_v = _font_line_h(F_JC_CLOSE_VAL)
+    y_pl_lbl = y + max(0, (lh_pl_v - lh_pl_l) // 2)
+    _draw_text(draw, x_label, y_pl_lbl, "Process Loss", F_TXT_B)
+    _draw_text_right(draw, x_val_right, y, vv_pl, F_JC_CLOSE_VAL)
+    y += max(lh_pl_l, lh_pl_v) + row_gap
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 6
+
+    # Space only before signatures (no horizontal rule)
+    y += sec_gap_after_pl + sec_gap_sig_block + 12
+
+    # Signatures — labels only; no underline strokes under signature area
+    _draw_text(draw, x_label, y, "Worker Signature", F_TXT)
+    _draw_text_right(draw, x_val_right, y, "Supervisor", F_TXT)
+    y += _font_line_h(F_TXT) + 14
+
+    box_y1 = y
     draw.rectangle((box_x0, box_y0, box_x1, box_y1), outline=0, width=1)
 
     img = img.crop((0, 0, W, min(H, box_y1 + 14)))
@@ -3008,6 +3161,31 @@ def print_metal_giving_slip_raster():
         return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
     except Exception as e:
         log(f"/print-metal-giving-slip-raster error: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/print-job-close-slip-raster", methods=["POST"])
+def print_job_close_slip_raster():
+    data = request.get_json(force=True, silent=True) or {}
+    printer = data.get("printer")
+    if not printer:
+        return jsonify({"ok": False, "error": "missing 'printer'"}), 400
+
+    try:
+        img1 = _render_job_close_slip_image_80mm(data)
+        parts = [b"\x1b@", _img_to_escpos_raster(img1), b"\r\n"]
+
+        feed_lines = int(data.get("feedLines", 3))
+        cut = bool(data.get("cut", True))
+        cut_mode = str(data.get("cutMode", "full")).lower()
+
+        if cut:
+            parts.append(_esc_feed(feed_lines))
+            parts.append(_esc_cut(cut_mode))
+
+        _write_raw(printer, b"".join(parts))
+        return jsonify({"ok": True, "widthDots": img1.size[0], "heightDots": img1.size[1]})
+    except Exception as e:
+        log(f"/print-job-close-slip-raster error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
