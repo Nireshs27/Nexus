@@ -1041,21 +1041,56 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     )
 
     show_delivery_barcode = bool(delivery_id)
+    procode_line = _safe_str(data.get("procodeLine")).strip()
+    usable_w = box_w - (in_pad_x * 2)
+    # When barcode exists, procode prints under centered "ID: …"; else under item lines.
+    procode_under_barcode_id = bool(show_delivery_barcode and procode_line)
 
     # extra space only when barcode exists
     delivery_bar_h = 40
     delivery_bar_w = 260  # or 280 if space allows
     delivery_text_gap = 6
     delivery_block_gap = 20
+    # Tighter padding after ID (+ procode if any) before divider; ID-only slips use full gap.
+    delivery_block_gap_after_procode = 6
     delivery_total_h = 0
     if show_delivery_barcode:
-        delivery_total_h = delivery_bar_h + _font_line_h(F_UNIT) + delivery_text_gap + delivery_block_gap
+        delivery_total_h = (
+            delivery_bar_h
+            + delivery_text_gap
+            + _font_line_h(F_UNIT)
+        )
+        if procode_under_barcode_id:
+            _tmp_pc = Image.new("L", (10, 10), 255)
+            _dt_pc = ImageDraw.Draw(_tmp_pc)
+            _pc_lines = _wrap_line_px(procode_line, _dt_pc, F_TXT, usable_w)
+            delivery_total_h += sum(
+                _font_line_h(F_TXT) + 2 for _ in _pc_lines
+            )
+        delivery_total_h += (
+            delivery_block_gap_after_procode
+            if procode_under_barcode_id
+            else delivery_block_gap
+        )
 
-    H = 520 + delivery_total_h + 20
+    repair_sample_tag = _safe_str(
+        data.get("repairSampleTag") or data.get("repair_sample_tag")
+    )
+    tag_above_line_gap = 4
+    tag_extra_h = (
+        _font_line_h(F_TXT) + tag_above_line_gap if repair_sample_tag else 0
+    )
+
+    H = 520 + delivery_total_h + 20 + tag_extra_h
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
 
     y = top_pad
+
+    if repair_sample_tag:
+        _draw_text_center(draw, box_x0 + box_w / 2, y, repair_sample_tag, F_TXT)
+        y += _font_line_h(F_TXT) + tag_above_line_gap
+
     box_y0 = y
 
     # Outer top border
@@ -1073,12 +1108,6 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     if date_str:
         # _draw_text_right(draw, box_x1 - in_pad_x, y, date_str, F_TXT)
         _draw_text_right(draw, box_x1 - in_pad_x - 80, y, date_str, F_TXT)
-
-    repair_sample_tag = _safe_str(
-        data.get("repairSampleTag") or data.get("repair_sample_tag")
-    )
-    if repair_sample_tag:
-        _draw_text_center(draw, box_x0 + box_w / 2, y, repair_sample_tag, F_TXT)
 
     y += gap_after_header
 
@@ -1109,8 +1138,14 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
         img.paste(delivery_barcode_img, (paste_x, y))
         y += delivery_bar_h + delivery_text_gap
 
-        _draw_text_center(draw, box_x0 + box_w / 2, y, f"ID: {delivery_id}", F_UNIT)
-        y += _font_line_h(F_UNIT) + delivery_block_gap
+        id_full = f"ID: {delivery_id}"
+        _draw_text_center(draw, box_x0 + box_w / 2, y, id_full, F_UNIT)
+        y += _font_line_h(F_UNIT)
+        if procode_under_barcode_id:
+            for ln in _wrap_line_px(procode_line, draw, F_TXT, usable_w):
+                _draw_text(draw, box_x0 + in_pad_x, y, ln, F_TXT)
+                y += _font_line_h(F_TXT) + 2
+        y += delivery_block_gap_after_procode if procode_under_barcode_id else delivery_block_gap
 
     # Divider below header / delivery barcode block
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
@@ -1169,11 +1204,17 @@ def _render_packing_delivery_slip_image_80mm(data: dict) -> Image.Image:
     else:
         item_text = base
 
-    usable_w = box_w - (in_pad_x * 2)
     lines = _wrap_line_px(item_text, draw, F_TXT_B, usable_w)
     for ln in lines:
         _draw_text(draw, box_x0 + in_pad_x, y, ln, F_TXT_B)
         y += item_line_gap
+
+    # Procode under barcode ID when delivery id present; else below item (e.g. no barcode).
+    if procode_line and not procode_under_barcode_id:
+        procode_lines = _wrap_line_px(procode_line, draw, F_TXT, usable_w)
+        for ln in procode_lines:
+            _draw_text(draw, box_x0 + in_pad_x, y, ln, F_TXT)
+            y += _font_line_h(F_TXT) + 2
 
     y += gap_before_weights
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
@@ -2906,11 +2947,7 @@ def _render_metal_giving_slip_image_80mm(data: dict) -> Image.Image:
 
 def _render_job_close_slip_image_80mm(data: dict) -> Image.Image:
     """
-    job_close_slip — matches handwritten layout:
-    Job Closing Header
-    Worker photo, Name
-    Weights rows
-    Signatures
+    job_close_slip — Job Closing header, worker, Finished Items (2-col), metal summary, signatures.
     """
     W = int(data.get("maxWidthDots", MAX_WIDTH_DOTS_80MM))
     margin_x = 18
@@ -2932,6 +2969,20 @@ def _render_job_close_slip_image_80mm(data: dict) -> Image.Image:
     worker_name = _safe_str(data.get("workerName")) or "-"
     worker_b64 = data.get("workerB64")
 
+    raw_fin_rows = data.get("finishedItemRows")
+    rows_list = []
+    if isinstance(raw_fin_rows, list):
+        for it in raw_fin_rows:
+            if isinstance(it, dict):
+                rows_list.append(
+                    {
+                        "unitWt": _safe_str(it.get("unitWt")) or "—",
+                        "itemName": _safe_str(it.get("itemName")) or "—",
+                    }
+                )
+    if len(rows_list) == 0:
+        rows_list = [{"unitWt": "—", "itemName": "—"}]
+
     val_giving = _metal_giving_weight_num(data.get("totalGiving"))
     val_received = _metal_giving_weight_num(data.get("totalReceived"))
     val_finished = _metal_giving_weight_num(data.get("finishedGoods"))
@@ -2941,7 +2992,7 @@ def _render_job_close_slip_image_80mm(data: dict) -> Image.Image:
 
     row_body_h = max(_font_line_h(F_TXT), _font_line_h(F_JC_CLOSE_VAL)) + row_gap
 
-    H = 2000
+    H = 4000
     img = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(img)
     y = top_pad
@@ -2982,12 +3033,55 @@ def _render_job_close_slip_image_80mm(data: dict) -> Image.Image:
     draw.line((box_x0, y, box_x1, y), fill=0, width=1)
     y += sec_gap_s
 
-    # METAL SUMMARY (no unit suffix in title) + underline matching title width
-    t_ms = "METAL SUMMARY"
-    tw_ms = _text_w(draw, t_ms, F_TXT_B)
-    _draw_text_center(draw, cx_page, y, t_ms, F_TXT_B)
+    # Finished Items — two columns (two items per row); names wrap within each half
+    t_fi = "Finished Items"
+    tw_fi = _text_w(draw, t_fi, F_TXT_B)
+    _draw_text_center(draw, cx_page, y, t_fi, F_TXT_B)
     y += _font_line_h(F_TXT_B) + 4
-    draw.line((cx_page - tw_ms / 2, y, cx_page + tw_ms / 2, y), fill=0, width=1)
+    draw.line((cx_page - tw_fi / 2, y, cx_page + tw_fi / 2, y), fill=0, width=1)
+    y += sec_gap_s
+
+    inner_w = box_w - 2 * jc_pad
+    col_gap_d = 10
+    half_w = max(60, (inner_w - col_gap_d) // 2)
+    w_unit_band = 52
+    intra_gap = 6
+    name_w_half = max(24, half_w - w_unit_band - intra_gap)
+
+    x_left_cell = x_label
+    x_left_u_right = x_left_cell + w_unit_band
+    x_left_name = x_left_u_right + intra_gap
+    x_right_cell = x_left_cell + half_w + col_gap_d
+    x_right_u_right = x_right_cell + w_unit_band
+    x_right_name = x_right_u_right + intra_gap
+
+    lh_fi = _font_line_h(F_TXT)
+    line_step_fi = lh_fi + 2
+
+    def _draw_fin_cell(uw, nm, x_u_right, x_name_left, y_top):
+        uw_s = (_safe_str(uw) or "—")[:24]
+        nm_s = _safe_str(nm) or "—"
+        name_lines = _wrap_line_px(nm_s, draw, F_TXT, name_w_half) or ["—"]
+        _draw_text_right(draw, x_u_right, y_top, uw_s, F_TXT)
+        for i, ln in enumerate(name_lines):
+            _draw_text(draw, x_name_left, y_top + i * line_step_fi, ln[:120], F_TXT)
+        return max(len(name_lines) * line_step_fi - 2, lh_fi)
+
+    idx = 0
+    n_fin = len(rows_list)
+    while idx < n_fin:
+        row_top = y
+        left = rows_list[idx]
+        h_l = _draw_fin_cell(left.get("unitWt"), left.get("itemName"), x_left_u_right, x_left_name, row_top)
+        h_r = 0
+        if idx + 1 < n_fin:
+            right = rows_list[idx + 1]
+            h_r = _draw_fin_cell(right.get("unitWt"), right.get("itemName"), x_right_u_right, x_right_name, row_top)
+        y = row_top + max(h_l, h_r) + row_gap
+        idx += 2
+
+    draw.line((box_x0, y, box_x1, y), fill=0, width=1)
+    y += 6
     y += sec_gap_s
 
     # Column header: bold, 1.2× former F_UNIT; same right edge as primary numeric column
